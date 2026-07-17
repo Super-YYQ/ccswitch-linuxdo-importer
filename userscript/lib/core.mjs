@@ -1,0 +1,719 @@
+/**
+ * Pure parse / classify / deeplink helpers for CC Switch linux.do importer.
+ * Used by Node tests and inlined into the Tampermonkey userscript.
+ */
+
+const MIN_SELECTION_LEN = 20
+
+const ENV_URL_KEYS = [
+  'ANTHROPIC_BASE_URL',
+  'ANTHROPIC_API_BASE',
+  'CLAUDE_BASE_URL',
+  'OPENAI_BASE_URL',
+  'OPENAI_API_BASE',
+  'CODEX_BASE_URL',
+  'BASE_URL',
+  'API_BASE_URL',
+]
+
+const ENV_KEY_KEYS = [
+  'ANTHROPIC_AUTH_TOKEN',
+  'ANTHROPIC_API_KEY',
+  'ANTHROPIC_API_TOKEN',
+  'CLAUDE_API_KEY',
+  'OPENAI_API_KEY',
+  'OPENAI_AUTH_TOKEN',
+  'CODEX_API_KEY',
+  'API_KEY',
+  'APIKEY',
+  'AUTH_TOKEN',
+  'TOKEN',
+]
+
+const URL_RE = /https?:\/\/[^\s"'`<>，。；、）)\]}]+/gi
+const SK_ANT_RE = /sk-ant-[A-Za-z0-9_\-]{10,}/g
+const SK_RE = /sk-[A-Za-z0-9_\-]{16,}/g
+const BEARER_RE = /Bearer\s+([A-Za-z0-9_\-.]{16,})/gi
+const BASE64_RE = /(?:^|[\s"'`])([A-Za-z0-9+/]{40,}={0,2})(?:$|[\s"'`])/g
+const DEEPLINK_RE = /ccswitch:\/\/[^\s"'`<>]+/i
+
+/**
+ * @typedef {'claude'|'codex'|null} AppKind
+ * @typedef {'deeplink'|'base64'|'json'|'env'|'toml'|'mixed'} SourceKind
+ * @typedef {{
+ *   name: string,
+ *   app: AppKind,
+ *   endpoint: string|null,
+ *   apiKey: string|null,
+ *   config: string|null,
+ *   configFormat: 'json'|'toml'|null,
+ *   source: SourceKind,
+ *   confidence: number,
+ *   candidateCount: number,
+ *   warnings: string[],
+ *   deeplink?: string|null
+ * }} ParseResult
+ */
+
+/**
+ * @param {string} text
+ * @returns {ParseResult|null}
+ */
+export function parseShareText(text) {
+  if (text == null) return null
+  const raw = String(text).trim()
+  if (raw.length < MIN_SELECTION_LEN) return null
+
+  const cleaned = stripMarkdownFences(raw)
+
+  // 1. Existing ccswitch deep link
+  const deep = extractDeeplink(cleaned)
+  if (deep) {
+    const fromLink = parseDeeplink(deep)
+    if (fromLink) {
+      fromLink.deeplink = deep
+      return fromLink
+    }
+  }
+
+  // 2. Base64 block → decode → re-parse content (without infinite loop: decode once)
+  const b64 = tryParseBase64(cleaned)
+  if (b64) return b64
+
+  // 3. JSON object
+  const json = tryParseJson(cleaned)
+  if (json) return json
+
+  // 4. TOML / key = "value"
+  const toml = tryParseTomlLike(cleaned)
+  if (toml) return toml
+
+  // 5. Env vars
+  const env = tryParseEnv(cleaned)
+  if (env) return env
+
+  // 6. Mixed noise extraction
+  return tryParseMixed(cleaned)
+}
+
+/**
+ * @param {string} text
+ */
+export function looksLikeConfig(text) {
+  if (!text || text.trim().length < MIN_SELECTION_LEN) return false
+  const t = text.trim()
+  if (DEEPLINK_RE.test(t)) return true
+  if (/ANTHROPIC_|OPENAI_|CODEX_|BASE_URL|API_KEY|apiKey|baseUrl|endpoint/i.test(t)) return true
+  if (/sk-ant-|sk-[A-Za-z0-9]{16,}/.test(t)) return true
+  if (/https?:\/\//i.test(t) && /sk-|Bearer\s+/i.test(t)) return true
+  if (/(?:^|[\s"'`])[A-Za-z0-9+/]{60,}={0,2}(?:$|[\s"'`])/.test(t)) return true
+  if (/\{[\s\S]*"(?:apiKey|api_key|baseUrl|endpoint|base_url)"[\s\S]*\}/.test(t)) return true
+  return false
+}
+
+/**
+ * @param {ParseResult} result
+ * @param {AppKind} [appOverride]
+ * @returns {string}
+ */
+export function buildDeeplink(result, appOverride) {
+  const app = appOverride || result.app
+  if (!app) {
+    throw new Error('app is required (claude or codex)')
+  }
+
+  const params = new URLSearchParams()
+  params.set('resource', 'provider')
+  params.set('app', app)
+  params.set('name', result.name || defaultName())
+
+  if (result.endpoint) params.set('endpoint', result.endpoint)
+  if (result.apiKey) params.set('apiKey', result.apiKey)
+
+  if (result.config) {
+    params.set('config', base64Encode(result.config))
+    params.set('configFormat', result.configFormat || 'json')
+  }
+
+  // URLSearchParams encodes spaces as +, deep links often prefer %20 — fine for most handlers
+  return `ccswitch://v1/import?${params.toString()}`
+}
+
+/**
+ * @param {string} key
+ * @returns {string}
+ */
+export function maskKey(key) {
+  if (!key) return ''
+  if (key.length <= 12) return '*'.repeat(Math.min(key.length, 8))
+  return `${key.slice(0, 8)}****${key.slice(-4)}`
+}
+
+/**
+ * @param {string} text
+ * @param {object} fields
+ * @returns {AppKind}
+ */
+export function classifyApp(text, fields = {}) {
+  const blob = [
+    text || '',
+    fields.endpoint || '',
+    fields.apiKey || '',
+    fields.name || '',
+    fields.config || '',
+  ]
+    .join('\n')
+    .toLowerCase()
+
+  let claude = 0
+  let codex = 0
+
+  if (/sk-ant-/.test(blob)) claude += 3
+  if (/anthropic/.test(blob)) claude += 2
+  if (/claude/.test(blob)) claude += 1
+  if (/an?thropic_/.test(blob)) claude += 2
+
+  if (/openai/.test(blob)) codex += 2
+  if (/codex/.test(blob)) codex += 3
+  if (/openai_api_key|openai_base/.test(blob)) codex += 2
+  if (/api\.openai\.com/.test(blob)) codex += 2
+
+  // generic sk- without ant leans slightly codex/openai, but weak
+  if (/sk-(?!ant)[a-z0-9]/.test(blob) && claude === 0) codex += 0.5
+
+  if (claude === 0 && codex === 0) return null
+  if (claude > codex) return 'claude'
+  if (codex > claude) return 'codex'
+  return null
+}
+
+// ─── internals ───────────────────────────────────────────────
+
+function defaultName() {
+  const d = new Date()
+  const pad = (n) => String(n).padStart(2, '0')
+  return `linuxdo-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}`
+}
+
+function stripMarkdownFences(text) {
+  return text
+    .replace(/^```[a-zA-Z0-9]*\s*\n?/gm, '')
+    .replace(/```$/gm, '')
+    .trim()
+}
+
+function emptyResult(partial) {
+  return {
+    name: defaultName(),
+    app: null,
+    endpoint: null,
+    apiKey: null,
+    config: null,
+    configFormat: null,
+    source: 'mixed',
+    confidence: 0,
+    candidateCount: 1,
+    warnings: [],
+    deeplink: null,
+    ...partial,
+  }
+}
+
+function extractDeeplink(text) {
+  const m = text.match(DEEPLINK_RE)
+  return m ? m[0] : null
+}
+
+/**
+ * @param {string} link
+ * @returns {ParseResult|null}
+ */
+function parseDeeplink(link) {
+  try {
+    // URL() may not like custom schemes in all envs — manual parse
+    const qIndex = link.indexOf('?')
+    if (qIndex < 0) return null
+    const qs = link.slice(qIndex + 1)
+    const params = new URLSearchParams(qs)
+    if (params.get('resource') && params.get('resource') !== 'provider') {
+      // still allow provider-like imports
+    }
+    const app = normalizeApp(params.get('app'))
+    const name = params.get('name') || defaultName()
+    const endpoint = params.get('endpoint') || params.get('baseUrl') || null
+    const apiKey = params.get('apiKey') || params.get('api_key') || null
+    let config = null
+    let configFormat = null
+    const configB64 = params.get('config')
+    if (configB64) {
+      try {
+        config = base64Decode(configB64)
+        configFormat = /** @type {'json'|'toml'} */ (params.get('configFormat') || 'json')
+      } catch {
+        /* ignore */
+      }
+    }
+    const confidence = endpoint || apiKey || config ? 0.95 : 0.5
+    if (!endpoint && !apiKey && !config) return null
+    return emptyResult({
+      name,
+      app,
+      endpoint,
+      apiKey,
+      config,
+      configFormat,
+      source: 'deeplink',
+      confidence,
+    })
+  } catch {
+    return null
+  }
+}
+
+function normalizeApp(app) {
+  if (!app) return null
+  const a = String(app).toLowerCase()
+  if (a === 'claude' || a === 'claudecode' || a === 'claude-code') return 'claude'
+  if (a === 'codex') return 'codex'
+  return null
+}
+
+function tryParseBase64(text) {
+  BASE64_RE.lastIndex = 0
+  let best = null
+  let m
+  while ((m = BASE64_RE.exec(text)) !== null) {
+    const token = m[1]
+    if (token.length < 40) continue
+    // skip if looks like a normal url fragment or key
+    if (token.startsWith('sk-')) continue
+    let decoded
+    try {
+      decoded = base64Decode(token)
+    } catch {
+      continue
+    }
+    if (!decoded || decoded.length < 10) continue
+    // must look like text config
+    if (!/[{=\n:]/.test(decoded) && !/https?:\/\//.test(decoded) && !/API|KEY|BASE/i.test(decoded)) {
+      continue
+    }
+    // parse decoded without re-running base64 on itself forever
+    const inner =
+      tryParseJson(decoded) ||
+      tryParseTomlLike(decoded) ||
+      tryParseEnv(decoded) ||
+      tryParseMixed(decoded)
+    if (inner && (inner.endpoint || inner.apiKey || inner.config)) {
+      inner.source = 'base64'
+      inner.confidence = Math.min(1, (inner.confidence || 0.6) + 0.1)
+      if (!best || inner.confidence > best.confidence) best = inner
+    }
+  }
+  return best
+}
+
+function tryParseJson(text) {
+  const objects = extractJsonObjects(text)
+  let best = null
+  for (const objStr of objects) {
+    let obj
+    try {
+      obj = JSON.parse(objStr)
+    } catch {
+      continue
+    }
+    if (!obj || typeof obj !== 'object' || Array.isArray(obj)) continue
+    const fields = pickProviderFields(obj)
+    if (!fields.endpoint && !fields.apiKey && !fields.hasConfigShape) continue
+    const app = classifyApp(text, fields)
+    const r = emptyResult({
+      name: fields.name || defaultName(),
+      app,
+      endpoint: fields.endpoint,
+      apiKey: fields.apiKey,
+      config: fields.hasConfigShape ? objStr : null,
+      configFormat: fields.hasConfigShape ? 'json' : null,
+      source: 'json',
+      confidence: scoreFields(fields, app),
+      warnings: buildWarnings(fields),
+    })
+    if (!best || r.confidence > best.confidence) best = r
+  }
+  return best
+}
+
+function extractJsonObjects(text) {
+  const results = []
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] !== '{') continue
+    let depth = 0
+    let inStr = false
+    let esc = false
+    for (let j = i; j < text.length; j++) {
+      const c = text[j]
+      if (inStr) {
+        if (esc) {
+          esc = false
+        } else if (c === '\\') {
+          esc = true
+        } else if (c === '"') {
+          inStr = false
+        }
+        continue
+      }
+      if (c === '"') {
+        inStr = true
+        continue
+      }
+      if (c === '{') depth++
+      else if (c === '}') {
+        depth--
+        if (depth === 0) {
+          results.push(text.slice(i, j + 1))
+          i = j
+          break
+        }
+      }
+    }
+  }
+  return results
+}
+
+function pickProviderFields(obj) {
+  const name = firstString(obj, ['name', 'title', 'label', 'provider', 'providerName'])
+  const endpoint = firstString(obj, [
+    'endpoint',
+    'baseUrl',
+    'base_url',
+    'baseURL',
+    'api_base',
+    'apiBase',
+    'url',
+    'host',
+  ])
+  const apiKey = firstString(obj, [
+    'apiKey',
+    'api_key',
+    'key',
+    'token',
+    'authToken',
+    'auth_token',
+    'secret',
+    'access_token',
+  ])
+  // nested env style
+  const env = obj.env || obj.environment || obj.settings || null
+  let ep = endpoint
+  let key = apiKey
+  if (env && typeof env === 'object') {
+    ep = ep || firstString(env, ENV_URL_KEYS.map((k) => k).concat(['baseUrl', 'endpoint']))
+    // also case-insensitive scan
+    if (!ep) ep = scanObjectForUrl(env)
+    if (!key) key = firstString(env, ENV_KEY_KEYS.concat(['apiKey', 'key']))
+    if (!key) key = scanObjectForKey(env)
+  }
+  if (!ep) ep = scanObjectForUrl(obj)
+  if (!key) key = scanObjectForKey(obj)
+
+  const hasConfigShape = !!(ep || key)
+  return { name, endpoint: ep, apiKey: key, hasConfigShape }
+}
+
+function firstString(obj, keys) {
+  for (const k of keys) {
+    if (obj[k] != null && String(obj[k]).trim()) return String(obj[k]).trim()
+  }
+  // case-insensitive
+  const lowerMap = {}
+  for (const [k, v] of Object.entries(obj)) {
+    lowerMap[k.toLowerCase()] = v
+  }
+  for (const k of keys) {
+    const v = lowerMap[k.toLowerCase()]
+    if (v != null && String(v).trim()) return String(v).trim()
+  }
+  return null
+}
+
+function scanObjectForUrl(obj) {
+  for (const [k, v] of Object.entries(obj)) {
+    if (typeof v === 'string' && /^https?:\/\//i.test(v.trim())) {
+      if (/url|base|endpoint|host|api/i.test(k)) return v.trim()
+    }
+  }
+  for (const v of Object.values(obj)) {
+    if (typeof v === 'string' && /^https?:\/\//i.test(v.trim())) return v.trim()
+  }
+  return null
+}
+
+function scanObjectForKey(obj) {
+  for (const [k, v] of Object.entries(obj)) {
+    if (typeof v === 'string' && /key|token|secret|auth/i.test(k) && v.trim().length >= 8) {
+      return v.trim()
+    }
+  }
+  for (const v of Object.values(obj)) {
+    if (typeof v === 'string' && /^(sk-ant-|sk-|Bearer\s+)/i.test(v.trim())) return v.trim().replace(/^Bearer\s+/i, '')
+  }
+  return null
+}
+
+function tryParseTomlLike(text) {
+  const endpoint =
+    matchQuotedAssignment(text, ['base_url', 'baseUrl', 'endpoint', 'api_base', 'url']) || null
+  const apiKey =
+    matchQuotedAssignment(text, ['api_key', 'apiKey', 'key', 'token', 'auth_token', 'secret']) || null
+  if (!endpoint && !apiKey) return null
+  // require at least one assignment-style line to distinguish from mixed
+  if (!/^\s*[\w.]+\s*=\s*.+/m.test(text) && !endpoint) return null
+  if (!/=\s*["']?/.test(text)) return null
+
+  const name = matchQuotedAssignment(text, ['name', 'title']) || defaultName()
+  const fields = { name, endpoint, apiKey }
+  const app = classifyApp(text, fields)
+  return emptyResult({
+    name,
+    app,
+    endpoint,
+    apiKey,
+    source: 'toml',
+    confidence: scoreFields(fields, app),
+    warnings: buildWarnings(fields),
+  })
+}
+
+function matchQuotedAssignment(text, keys) {
+  for (const key of keys) {
+    const re = new RegExp(
+      `(?:^|[\\s;])${escapeRegExp(key)}\\s*=\\s*(?:"([^"]+)"|'([^']+)'|(\\S+))`,
+      'im',
+    )
+    const m = text.match(re)
+    if (m) return (m[1] || m[2] || m[3] || '').trim()
+  }
+  return null
+}
+
+function tryParseEnv(text) {
+  const map = parseEnvMap(text)
+  if (Object.keys(map).length === 0) return null
+
+  let endpoint = null
+  let apiKey = null
+  for (const k of ENV_URL_KEYS) {
+    if (map[k]) {
+      endpoint = map[k]
+      break
+    }
+  }
+  for (const k of ENV_KEY_KEYS) {
+    if (map[k]) {
+      apiKey = map[k]
+      break
+    }
+  }
+  // fuzzy
+  if (!endpoint) {
+    for (const [k, v] of Object.entries(map)) {
+      if (/BASE_URL|API_BASE|ENDPOINT/i.test(k) && /^https?:\/\//i.test(v)) {
+        endpoint = v
+        break
+      }
+    }
+  }
+  if (!apiKey) {
+    for (const [k, v] of Object.entries(map)) {
+      if (/API_KEY|AUTH_TOKEN|TOKEN|SECRET/i.test(k) && v.length >= 8) {
+        apiKey = v
+        break
+      }
+    }
+  }
+
+  if (!endpoint && !apiKey) return null
+
+  const fields = { name: defaultName(), endpoint, apiKey }
+  const app = classifyApp(text, fields)
+  return emptyResult({
+    name: defaultName(),
+    app,
+    endpoint,
+    apiKey,
+    source: 'env',
+    confidence: scoreFields(fields, app) + 0.05,
+    warnings: buildWarnings(fields),
+  })
+}
+
+function parseEnvMap(text) {
+  const map = {}
+  const lines = text.split(/\r?\n/)
+  for (const line of lines) {
+    const trimmed = line.trim()
+    if (!trimmed || trimmed.startsWith('#')) continue
+    // KEY=value or export KEY=value
+    const m = trimmed.match(/^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/)
+    if (!m) continue
+    let val = m[2].trim()
+    if (
+      (val.startsWith('"') && val.endsWith('"')) ||
+      (val.startsWith("'") && val.endsWith("'"))
+    ) {
+      val = val.slice(1, -1)
+    }
+    // strip trailing inline comments loosely
+    val = val.replace(/\s+#.*$/, '').trim()
+    if (val) map[m[1]] = val
+  }
+  // also allow single-line KEY=value KEY2=value
+  if (Object.keys(map).length === 0) {
+    const re = /([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([^\s]+)/g
+    let m
+    while ((m = re.exec(text)) !== null) {
+      if (ENV_URL_KEYS.includes(m[1]) || ENV_KEY_KEYS.includes(m[1]) || /URL|KEY|TOKEN/i.test(m[1])) {
+        map[m[1]] = m[2].replace(/^["']|["']$/g, '')
+      }
+    }
+  }
+  return map
+}
+
+function tryParseMixed(text) {
+  const urls = unique(matchAll(text, URL_RE).map(cleanUrl))
+  const keys = unique([
+    ...matchAll(text, SK_ANT_RE),
+    ...matchAll(text, SK_RE).filter((k) => !k.startsWith('sk-ant-') || true),
+    ...matchAllGroups(text, BEARER_RE, 1),
+  ])
+
+  // de-dupe sk-ant already in sk-
+  const apiKeys = unique(keys)
+
+  if (urls.length === 0 && apiKeys.length === 0) return null
+
+  // prefer anthropic-looking url + sk-ant key
+  let endpoint = pickBestUrl(urls, text)
+  let apiKey = pickBestKey(apiKeys)
+
+  const fields = { name: defaultName(), endpoint, apiKey }
+  const app = classifyApp(text, fields)
+  const candidateCount = Math.max(urls.length, 1) * Math.max(apiKeys.length, 1)
+  const warnings = buildWarnings(fields)
+  if (candidateCount > 1) {
+    warnings.push(`检测到 ${urls.length} 个 URL、${apiKeys.length} 个 key，已选取置信度最高的一对`)
+  }
+
+  const confidence = scoreFields(fields, app) * (candidateCount > 1 ? 0.9 : 1)
+  if (!endpoint && !apiKey) return null
+
+  return emptyResult({
+    name: defaultName(),
+    app,
+    endpoint,
+    apiKey,
+    source: 'mixed',
+    confidence,
+    candidateCount,
+    warnings,
+  })
+}
+
+function pickBestUrl(urls, text) {
+  if (urls.length === 0) return null
+  const scored = urls.map((u) => {
+    let s = 0
+    const lower = u.toLowerCase()
+    if (/anthropic|claude/.test(lower)) s += 3
+    if (/openai|codex/.test(lower)) s += 2
+    if (/api\./.test(lower)) s += 1
+    if (/127\.0\.0\.1|localhost/.test(lower)) s += 1 // local proxy common
+    // proximity to key words in original text
+    if (new RegExp(`(?:BASE_URL|endpoint|baseUrl)[^\\n]{0,40}${escapeRegExp(u.slice(0, 30))}`, 'i').test(text)) {
+      s += 2
+    }
+    return { u, s }
+  })
+  scored.sort((a, b) => b.s - a.s)
+  return scored[0].u
+}
+
+function pickBestKey(keys) {
+  if (keys.length === 0) return null
+  const scored = keys.map((k) => {
+    let s = k.length / 100
+    if (k.startsWith('sk-ant-')) s += 3
+    else if (k.startsWith('sk-')) s += 2
+    return { k, s }
+  })
+  scored.sort((a, b) => b.s - a.s)
+  return scored[0].k
+}
+
+function cleanUrl(u) {
+  return u.replace(/[.,;:!?）)」』】]+$/g, '')
+}
+
+function scoreFields(fields, app) {
+  let s = 0.3
+  if (fields.endpoint) s += 0.35
+  if (fields.apiKey) s += 0.35
+  if (app) s += 0.1
+  return Math.min(1, s)
+}
+
+function buildWarnings(fields) {
+  const w = []
+  if (fields.endpoint && !fields.apiKey) w.push('未识别到 API Key，仍可尝试导入')
+  if (!fields.endpoint && fields.apiKey) w.push('未识别到 endpoint/base URL，仍可尝试导入')
+  if (fields.endpoint && !/^https?:\/\//i.test(fields.endpoint)) {
+    w.push('endpoint 不是 http(s) URL')
+  }
+  return w
+}
+
+function matchAll(text, re) {
+  const out = []
+  const r = new RegExp(re.source, re.flags.includes('g') ? re.flags : re.flags + 'g')
+  let m
+  while ((m = r.exec(text)) !== null) out.push(m[0])
+  return out
+}
+
+function matchAllGroups(text, re, group) {
+  const out = []
+  const r = new RegExp(re.source, re.flags.includes('g') ? re.flags : re.flags + 'g')
+  let m
+  while ((m = r.exec(text)) !== null) out.push(m[group])
+  return out
+}
+
+function unique(arr) {
+  return [...new Set(arr.filter(Boolean))]
+}
+
+function escapeRegExp(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+export function base64Encode(str) {
+  if (typeof Buffer !== 'undefined') {
+    return Buffer.from(str, 'utf8').toString('base64')
+  }
+  // browser
+  return btoa(unescape(encodeURIComponent(str)))
+}
+
+export function base64Decode(b64) {
+  // normalize url-safe
+  let s = b64.replace(/-/g, '+').replace(/_/g, '/')
+  const pad = s.length % 4
+  if (pad) s += '='.repeat(4 - pad)
+  if (typeof Buffer !== 'undefined') {
+    return Buffer.from(s, 'base64').toString('utf8')
+  }
+  return decodeURIComponent(escape(atob(s)))
+}
+
+export { MIN_SELECTION_LEN }
