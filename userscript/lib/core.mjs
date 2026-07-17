@@ -177,16 +177,23 @@ export function classifyApp(text, fields = {}) {
 
   if (/sk-ant-/.test(blob)) claude += 3
   if (/anthropic/.test(blob)) claude += 2
-  if (/claude/.test(blob)) claude += 1
   if (/an?thropic_/.test(blob)) claude += 2
+  // bare "claude" in model lists is weak (e.g. "claude系列均会转发")
+  if (/\bclaude\b/.test(blob)) claude += 0.5
 
   if (/openai/.test(blob)) codex += 2
   if (/codex/.test(blob)) codex += 3
   if (/openai_api_key|openai_base/.test(blob)) codex += 2
   if (/api\.openai\.com/.test(blob)) codex += 2
+  if (/\bgpt-?\d/.test(blob)) codex += 0.5
 
-  // generic sk- without ant leans slightly codex/openai, but weak
-  if (/sk-(?!ant)[a-z0-9]/.test(blob) && claude === 0) codex += 0.5
+  // generic sk- without ant leans slightly openai/codex, but weak
+  if (/sk-(?!ant)[a-z0-9]/.test(blob) && claude < 2) codex += 0.5
+
+  // multi-model relay blurbs mentioning both → leave to user
+  const mentionsBothModels =
+    /\bgpt-?\d/.test(blob) && /\bclaude\b/.test(blob) && !/sk-ant-/.test(blob)
+  if (mentionsBothModels && Math.abs(claude - codex) < 1.5) return null
 
   if (claude === 0 && codex === 0) return null
   if (claude > codex) return 'claude'
@@ -600,6 +607,7 @@ function tryParseMixed(text) {
     ...matchAll(text, SK_RE),
     ...matchAllGroups(text, BEARER_RE, 1),
     ...extractLooseKeys(text),
+    ...extractBase64DecodedKeys(text),
     ...(labeled.apiKey ? [labeled.apiKey] : []),
   ])
 
@@ -637,51 +645,134 @@ function tryParseMixed(text) {
 }
 
 /**
- * Parse "url：https://..." / "key: xxx" / "密钥：..." style lines (CN fullwidth colon).
+ * Parse labeled / table-style shares common on linux.do:
+ * - "url：https://..." / "key: xxx" (fullwidth colon)
+ * - "Base URL    https://..." (table cells / multi-space)
+ * - "API Key（Base64，请自行解码）" on one line, value on the next
  */
 function extractLabeledFields(text) {
   const result = { endpoint: null, apiKey: null, name: null, hit: false }
   const lines = text.split(/\r?\n/)
-  const labelRe =
-    /^\s*(url|base[_-]?url|endpoint|api[_-]?base|host|地址|接口|链接|key|api[_-]?key|token|secret|auth[_-]?token|密钥|name|名称|名字)\s*[:：=\s]\s*(.+?)\s*$/i
 
-  for (const line of lines) {
-    const m = line.match(labelRe)
-    if (!m) continue
-    const label = m[1].toLowerCase()
-    let value = m[2].trim()
-    // strip wrapping quotes
+  const isKeyLabel = (s) =>
+    /^(?:api\s*key|api[_-]?key|key|token|secret|auth[_-]?token|密钥)(?:\b|[（(]|$)/i.test(s)
+  const isUrlLabel = (s) =>
+    /^(?:url|base\s*url|base[_-]?url|endpoint|api\s*base|api[_-]?base|host|地址|接口|链接)(?:\b|[（(]|$)/i.test(
+      s,
+    )
+  const isNameLabel = (s) => /^(?:name|名称|名字)(?:\b|[（(]|$)/i.test(s)
+
+  const stripValue = (value) => {
+    let v = String(value || '').trim()
     if (
-      (value.startsWith('"') && value.endsWith('"')) ||
-      (value.startsWith("'") && value.endsWith("'"))
+      (v.startsWith('"') && v.endsWith('"')) ||
+      (v.startsWith("'") && v.endsWith("'"))
     ) {
-      value = value.slice(1, -1).trim()
+      v = v.slice(1, -1).trim()
     }
-    // drop trailing Chinese punctuation
-    value = value.replace(/[，。；、！？]+$/g, '')
-    if (!value) continue
-    result.hit = true
+    return v.replace(/[，。；、！？]+$/g, '')
+  }
 
-    if (/url|base|endpoint|host|地址|接口|链接/.test(label)) {
-      const u = (value.match(URL_RE) || [])[0]
-      if (u) result.endpoint = cleanUrl(u)
-      else if (/^https?:\/\//i.test(value)) result.endpoint = cleanUrl(value)
-    } else if (/key|token|secret|auth|密钥/.test(label)) {
-      result.apiKey = maybeDecodeKey(value)
-    } else if (/name|名称|名字/.test(label)) {
-      result.name = value
+  const lookLikeKeyValue = (v) =>
+    !!v &&
+    ( /^(sk-ant-|sk-|g2a_|Bearer\s)/i.test(v) ||
+      /^[A-Za-z0-9+/_-]{16,}={0,2}$/.test(v) ||
+      v.length >= 12 )
+
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i]
+    const line = raw.trim()
+    if (!line) continue
+
+    // "API Key（Base64，请自行解码）" — label only, value on following line(s)
+    // Allow optional trailing notes in fullwidth/halfwidth parens.
+    const keyLabelOnly = line.match(
+      /^(?:api\s*key|api[_-]?key|key|token|secret|auth[_-]?token|密钥)(?:\s*[（(][^）)]*[）)])?\s*[:：]?\s*$/i,
+    )
+    if (keyLabelOnly && !result.apiKey) {
+      for (let j = i + 1; j < Math.min(i + 5, lines.length); j++) {
+        const next = lines[j].trim()
+        if (!next) continue
+        // stop if next line looks like another label
+        if (isUrlLabel(next) || isKeyLabel(next) || isNameLabel(next)) break
+        if (lookLikeKeyValue(next) && !/^https?:\/\//i.test(next)) {
+          result.apiKey = maybeDecodeKey(next)
+          result.hit = true
+          break
+        }
+      }
+      continue
+    }
+
+    // Same-line colon form: Base URL：https://... / key：xxx
+    const colon = line.match(
+      /^(url|base\s*url|base[_-]?url|endpoint|api\s*base|api[_-]?base|host|地址|接口|链接|key|api\s*key|api[_-]?key|token|secret|auth[_-]?token|密钥|name|名称|名字)\s*[:：=]\s*(.+)$/i,
+    )
+    if (colon) {
+      const label = colon[1].toLowerCase().replace(/\s+/g, '')
+      let value = stripValue(colon[2])
+      // value might still be a note like "（Base64，请自行解码）" with real value next line
+      if (
+        /key|token|secret|auth|密钥/.test(label) &&
+        (!lookLikeKeyValue(value) || /base64|解码|自行/i.test(value))
+      ) {
+        for (let j = i + 1; j < Math.min(i + 5, lines.length); j++) {
+          const next = lines[j].trim()
+          if (!next) continue
+          if (lookLikeKeyValue(next) && !/^https?:\/\//i.test(next)) {
+            value = next
+            break
+          }
+        }
+      }
+      if (!value) continue
+      result.hit = true
+      if (/url|base|endpoint|host|地址|接口|链接/.test(label)) {
+        const u = (value.match(URL_RE) || [])[0]
+        if (u) result.endpoint = cleanUrl(u)
+        else if (/^https?:\/\//i.test(value)) result.endpoint = cleanUrl(value)
+      } else if (/key|token|secret|auth|密钥/.test(label)) {
+        result.apiKey = maybeDecodeKey(value)
+      } else if (/name|名称|名字/.test(label)) {
+        result.name = value
+      }
+      continue
+    }
+
+    // Table / multi-space: "Base URL    https://api.example.invalid"
+    const table = line.match(
+      /^(url|base\s*url|base[_-]?url|endpoint|api\s*base|api[_-]?base|host|地址|接口|链接|key|api\s*key|api[_-]?key|token|secret|auth[_-]?token|密钥|name|名称|名字)\s{2,}(.+)$/i,
+    )
+    if (table) {
+      const label = table[1].toLowerCase().replace(/\s+/g, '')
+      const value = stripValue(table[2])
+      if (!value) continue
+      result.hit = true
+      if (/url|base|endpoint|host|地址|接口|链接/.test(label)) {
+        const u = (value.match(URL_RE) || [])[0]
+        if (u) result.endpoint = cleanUrl(u)
+        else if (/^https?:\/\//i.test(value)) result.endpoint = cleanUrl(value)
+      } else if (/key|token|secret|auth|密钥/.test(label)) {
+        result.apiKey = maybeDecodeKey(value)
+      } else if (/name|名称|名字/.test(label)) {
+        result.name = value
+      }
+      continue
     }
   }
 
   // single-line form: url：https://x key：yyy
   if (!result.endpoint || !result.apiKey) {
     const inlineUrl = text.match(
-      /(?:url|base[_-]?url|endpoint|地址|接口)\s*[:：]\s*(https?:\/\/[^\s，。；]+)/i,
+      /(?:url|base[_-]?url|base\s*url|endpoint|地址|接口)\s*[:：]\s*(https?:\/\/[^\s，。；]+)/i,
     )
-    if (inlineUrl && !result.endpoint) result.endpoint = cleanUrl(inlineUrl[1])
+    if (inlineUrl && !result.endpoint) {
+      result.endpoint = cleanUrl(inlineUrl[1])
+      result.hit = true
+    }
 
     const inlineKey = text.match(
-      /(?:key|api[_-]?key|token|密钥)\s*[:：]\s*([A-Za-z0-9_+\-/=]{8,})/i,
+      /(?:key|api[_-]?key|api\s*key|token|密钥)\s*[:：]\s*([A-Za-z0-9_+\-/=]{8,})/i,
     )
     if (inlineKey && !result.apiKey) {
       result.apiKey = maybeDecodeKey(inlineKey[1])
@@ -733,7 +824,7 @@ function extractLooseKeys(text) {
   if (vendor) out.push(...vendor)
   // labeled base64 on same line already handled; also standalone long base64 after 密钥/key
   const afterLabel = text.match(
-    /(?:key|api[_-]?key|token|密钥)\s*[:：]\s*([A-Za-z0-9+/_-]{20,}={0,2})/gi,
+    /(?:key|api[_-]?key|api\s*key|token|密钥)\s*[:：]\s*([A-Za-z0-9+/_-]{20,}={0,2})/gi,
   )
   if (afterLabel) {
     for (const chunk of afterLabel) {
@@ -742,6 +833,52 @@ function extractLooseKeys(text) {
     }
   }
   return out
+}
+
+/**
+ * Standalone base64 lines/tokens that decode to sk- / g2a_ style API keys.
+ * Common on linux.do: "API Key（Base64，请自行解码）" + next line base64.
+ */
+function extractBase64DecodedKeys(text) {
+  const out = []
+  const lines = text.split(/\r?\n/)
+  for (const line of lines) {
+    const t = line.trim()
+    // whole line is base64
+    if (/^[A-Za-z0-9+/_-]{24,}={0,2}$/.test(t)) {
+      const decoded = maybeDecodeKey(t)
+      if (decoded && decoded !== t && /^(sk-ant-|sk-|g2a_)/i.test(decoded)) {
+        out.push(decoded)
+        continue
+      }
+      // maybeDecodeKey may return original; try explicit decode check
+      try {
+        const d = base64Decode(t).trim()
+        if (/^(sk-ant-|sk-|g2a_)/i.test(d) && !/\s/.test(d) && d.length >= 8) {
+          out.push(d)
+        }
+      } catch {
+        /* ignore */
+      }
+      continue
+    }
+  }
+  // also scan inline base64 blobs (not only whole lines)
+  const re = /(?:^|[\s"'`])([A-Za-z0-9+/]{32,}={0,2})(?=$|[\s"'`])/gm
+  let m
+  while ((m = re.exec(text)) !== null) {
+    const token = m[1]
+    if (token.startsWith('sk-') || token.startsWith('http')) continue
+    try {
+      const d = base64Decode(token).trim()
+      if (/^(sk-ant-|sk-|g2a_)/i.test(d) && !/\s/.test(d) && d.length >= 8 && d.length <= 512) {
+        out.push(d)
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+  return unique(out)
 }
 
 function pickBestUrl(urls, text) {

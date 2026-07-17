@@ -136,6 +136,26 @@ key：ZzJhX3Rlc3Rvbmx5X25vdF9hX3JlYWxfdG9rZW5fYWJjZGVmZ2hpag==`
     assert.ok(r.confidence >= 0.6)
   })
 
+  it('parses table Base URL + next-line Base64 API Key', () => {
+    const text = `配置项    值
+Base URL    https://api.example.invalid
+额度查询页    打开网站后输入 key 可以查询使用额度记录
+模型设置    gpt-5.5，gpt-5.6-sol，claude系列均会转发到grok4.5
+API Key（Base64，请自行解码）
+c2stdGVzdC1vbmx5LTAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAw
+如果想自己稳定`
+    assert.equal(looksLikeConfig(text), true)
+    const r = parseShareText(text)
+    assert.ok(r)
+    assert.equal(r.endpoint, 'https://api.example.invalid')
+    assert.equal(
+      r.apiKey,
+      'sk-test-only-000000000000000000000000',
+    )
+    // multi-model blurb should not hard-force claude
+    assert.ok(r.app === null || r.app === 'codex' || r.app === 'claude')
+  })
+
   it('returns null for pure prose', () => {
     const r = parseShareText(
       '今天天气不错，我们来讨论一下如何学习 Linux 内核以及写驱动的心得体会吧朋友们',
