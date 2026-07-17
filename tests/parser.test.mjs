@@ -123,6 +123,19 @@ describe('parseShareText · mixed', () => {
     assert.ok(['mixed', 'env'].includes(r.source))
   })
 
+  it('parses url：/key： fullwidth labels with base64 key', () => {
+    const text = `免费500刀（并发80，rpm1200）
+url：https://grok.example.invalid
+key：ZzJhX3Rlc3Rvbmx5X25vdF9hX3JlYWxfdG9rZW5fYWJjZGVmZ2hpag==`
+    assert.equal(looksLikeConfig(text), true)
+    const r = parseShareText(text)
+    assert.ok(r)
+    assert.equal(r.endpoint, 'https://grok.example.invalid')
+    // base64-decoded key (g2a_...)
+    assert.equal(r.apiKey, 'g2a_testonly_not_a_real_token_abcdefghij')
+    assert.ok(r.confidence >= 0.6)
+  })
+
   it('returns null for pure prose', () => {
     const r = parseShareText(
       '今天天气不错，我们来讨论一下如何学习 Linux 内核以及写驱动的心得体会吧朋友们',

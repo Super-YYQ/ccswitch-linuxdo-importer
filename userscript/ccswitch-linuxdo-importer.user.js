@@ -127,7 +127,14 @@ function looksLikeConfig(text) {
   if (/ANTHROPIC_|OPENAI_|CODEX_|BASE_URL|API_KEY|apiKey|baseUrl|endpoint/i.test(t)) return true
   if (/sk-ant-|sk-[A-Za-z0-9]{16,}/.test(t)) return true
   if (/https?:\/\//i.test(t) && /sk-|Bearer\s+/i.test(t)) return true
-  if (/(?:^|[\s"'`])[A-Za-z0-9+/]{60,}={0,2}(?:$|[\s"'`])/.test(t)) return true
+  // labeled shares: url： / key： / 密钥： (fullwidth colon common on CN forums)
+  if (/(?:url|base[_-]?url|endpoint|key|api[_-]?key|token|密钥|地址|接口)\s*[:：]/i.test(t)) {
+    if (/https?:\/\//i.test(t) || /[A-Za-z0-9_+\-/]{16,}/.test(t)) return true
+  }
+  // url + base64-ish token (key often base64-encoded on linux.do)
+  if (/https?:\/\//i.test(t) && /[A-Za-z0-9+/]{32,}={0,2}/.test(t)) return true
+  // base64 blob (allow fullwidth punctuation around it)
+  if (/(?:^|[\s"'`：:：])[A-Za-z0-9+/]{40,}={0,2}(?:$|[\s"'`])/.test(t)) return true
   if (/\{[\s\S]*"(?:apiKey|api_key|baseUrl|endpoint|base_url)"[\s\S]*\}/.test(t)) return true
   return false
 }
@@ -602,23 +609,32 @@ function parseEnvMap(text) {
 }
 
 function tryParseMixed(text) {
-  const urls = unique(matchAll(text, URL_RE).map(cleanUrl))
-  const keys = unique([
-    ...matchAll(text, SK_ANT_RE),
-    ...matchAll(text, SK_RE).filter((k) => !k.startsWith('sk-ant-') || true),
-    ...matchAllGroups(text, BEARER_RE, 1),
+  const labeled = extractLabeledFields(text)
+
+  const urls = unique([
+    ...matchAll(text, URL_RE).map(cleanUrl),
+    ...(labeled.endpoint ? [labeled.endpoint] : []),
   ])
 
-  // de-dupe sk-ant already in sk-
+  const keys = unique([
+    ...matchAll(text, SK_ANT_RE),
+    ...matchAll(text, SK_RE),
+    ...matchAllGroups(text, BEARER_RE, 1),
+    ...extractLooseKeys(text),
+    ...(labeled.apiKey ? [labeled.apiKey] : []),
+  ])
+
   const apiKeys = unique(keys)
 
   if (urls.length === 0 && apiKeys.length === 0) return null
 
-  // prefer anthropic-looking url + sk-ant key
-  let endpoint = pickBestUrl(urls, text)
-  let apiKey = pickBestKey(apiKeys)
+  let endpoint = labeled.endpoint || pickBestUrl(urls, text)
+  let apiKey = labeled.apiKey || pickBestKey(apiKeys)
 
-  const fields = { name: defaultName(), endpoint, apiKey }
+  // Prefer decoded form when labeled key was base64
+  if (apiKey) apiKey = maybeDecodeKey(apiKey)
+
+  const fields = { name: labeled.name || defaultName(), endpoint, apiKey }
   const app = classifyApp(text, fields)
   const candidateCount = Math.max(urls.length, 1) * Math.max(apiKeys.length, 1)
   const warnings = buildWarnings(fields)
@@ -630,15 +646,123 @@ function tryParseMixed(text) {
   if (!endpoint && !apiKey) return null
 
   return emptyResult({
-    name: defaultName(),
+    name: fields.name,
     app,
     endpoint,
     apiKey,
-    source: 'mixed',
-    confidence,
+    source: labeled.hit ? 'mixed' : 'mixed',
+    confidence: labeled.hit ? Math.min(1, confidence + 0.1) : confidence,
     candidateCount,
     warnings,
   })
+}
+
+/**
+ * Parse "url：https://..." / "key: xxx" / "密钥：..." style lines (CN fullwidth colon).
+ */
+function extractLabeledFields(text) {
+  const result = { endpoint: null, apiKey: null, name: null, hit: false }
+  const lines = text.split(/\r?\n/)
+  const labelRe =
+    /^\s*(url|base[_-]?url|endpoint|api[_-]?base|host|地址|接口|链接|key|api[_-]?key|token|secret|auth[_-]?token|密钥|name|名称|名字)\s*[:：=\s]\s*(.+?)\s*$/i
+
+  for (const line of lines) {
+    const m = line.match(labelRe)
+    if (!m) continue
+    const label = m[1].toLowerCase()
+    let value = m[2].trim()
+    // strip wrapping quotes
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1).trim()
+    }
+    // drop trailing Chinese punctuation
+    value = value.replace(/[，。；、！？]+$/g, '')
+    if (!value) continue
+    result.hit = true
+
+    if (/url|base|endpoint|host|地址|接口|链接/.test(label)) {
+      const u = (value.match(URL_RE) || [])[0]
+      if (u) result.endpoint = cleanUrl(u)
+      else if (/^https?:\/\//i.test(value)) result.endpoint = cleanUrl(value)
+    } else if (/key|token|secret|auth|密钥/.test(label)) {
+      result.apiKey = maybeDecodeKey(value)
+    } else if (/name|名称|名字/.test(label)) {
+      result.name = value
+    }
+  }
+
+  // single-line form: url：https://x key：yyy
+  if (!result.endpoint || !result.apiKey) {
+    const inlineUrl = text.match(
+      /(?:url|base[_-]?url|endpoint|地址|接口)\s*[:：]\s*(https?:\/\/[^\s，。；]+)/i,
+    )
+    if (inlineUrl && !result.endpoint) result.endpoint = cleanUrl(inlineUrl[1])
+
+    const inlineKey = text.match(
+      /(?:key|api[_-]?key|token|密钥)\s*[:：]\s*([A-Za-z0-9_+\-/=]{8,})/i,
+    )
+    if (inlineKey && !result.apiKey) {
+      result.apiKey = maybeDecodeKey(inlineKey[1])
+      result.hit = true
+    }
+  }
+
+  return result
+}
+
+/**
+ * If value is base64 that decodes to a printable API token, return decoded; else original.
+ */
+function maybeDecodeKey(value) {
+  if (!value) return value
+  const v = String(value).trim()
+  // already looks like a normal key
+  if (/^(sk-ant-|sk-|g2a_|Bearer\s)/i.test(v)) {
+    return v.replace(/^Bearer\s+/i, '')
+  }
+  // base64-ish (length multiple-ish, charset, often ends with =)
+  if (!/^[A-Za-z0-9+/_-]+={0,2}$/.test(v) || v.length < 20) return v
+  try {
+    const decoded = base64Decode(v).trim()
+    // decoded should look like a token: printable, no spaces, reasonable length
+    if (
+      decoded.length >= 8 &&
+      decoded.length <= 512 &&
+      /^[\x20-\x7E]+$/.test(decoded) &&
+      !/\s/.test(decoded) &&
+      /[A-Za-z0-9]/.test(decoded)
+    ) {
+      // prefer decoded when it looks more like a key than the raw b64
+      if (/^(sk-ant-|sk-|g2a_)/i.test(decoded) || decoded.includes('_') || decoded.length < v.length) {
+        return decoded
+      }
+    }
+  } catch {
+    /* keep original */
+  }
+  return v
+}
+
+/** Non-sk tokens that appear after key labels or as long secrets */
+function extractLooseKeys(text) {
+  const out = []
+  // g2a_ / other vendor prefixes
+  const vendor = text.match(/\b(?:g2a_|nk-|pk-|rk-)[A-Za-z0-9_\-]{8,}\b/g)
+  if (vendor) out.push(...vendor)
+  // labeled base64 on same line already handled; also standalone long base64 after 密钥/key
+  const afterLabel = text.match(
+    /(?:key|api[_-]?key|token|密钥)\s*[:：]\s*([A-Za-z0-9+/_-]{20,}={0,2})/gi,
+  )
+  if (afterLabel) {
+    for (const chunk of afterLabel) {
+      const m = chunk.match(/[:：]\s*([A-Za-z0-9+/_-]{20,}={0,2})/)
+      if (m) out.push(maybeDecodeKey(m[1]))
+    }
+  }
+  return out
 }
 
 function pickBestUrl(urls, text) {
@@ -666,10 +790,12 @@ function pickBestKey(keys) {
     let s = k.length / 100
     if (k.startsWith('sk-ant-')) s += 3
     else if (k.startsWith('sk-')) s += 2
+    else if (/^g2a_/i.test(k)) s += 2
+    else if (/^[A-Za-z0-9+/]+={1,2}$/.test(k) && k.length >= 24) s += 0.5 // raw b64
     return { k, s }
   })
   scored.sort((a, b) => b.s - a.s)
-  return scored[0].k
+  return maybeDecodeKey(scored[0].k)
 }
 
 function cleanUrl(u) {
