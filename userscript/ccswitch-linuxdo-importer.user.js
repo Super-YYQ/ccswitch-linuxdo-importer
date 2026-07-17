@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         CC Switch Importer for linux.do
 // @namespace    https://github.com/yanyaqi/ccswitch-linuxdo-importer
-// @version      1.0.0
+// @version      1.0.1
 // @description  在 linux.do 选中 API 分享文本，解析后通过 ccswitch:// 导入 CC Switch（Claude Code / Codex）
 // @author       yanyaqi
 // @match        https://linux.do/*
@@ -82,10 +82,10 @@ const DEEPLINK_RE = /ccswitch:\/\/[^\s"'`<>]+/i
  */
 function parseShareText(text) {
   if (text == null) return null
-  const raw = String(text).trim()
+  const raw = normalizeShareText(text)
   if (raw.length < MIN_SELECTION_LEN) return null
 
-  const cleaned = stripMarkdownFences(raw)
+  const cleaned = repairBrokenBase64(stripMarkdownFences(raw))
 
   // 1. Existing ccswitch deep link
   const deep = extractDeeplink(cleaned)
@@ -99,22 +99,88 @@ function parseShareText(text) {
 
   // 2. Base64 block → decode → re-parse content (without infinite loop: decode once)
   const b64 = tryParseBase64(cleaned)
-  if (b64) return b64
+  if (b64) return finalizeResult(b64)
 
   // 3. JSON object
   const json = tryParseJson(cleaned)
-  if (json) return json
+  if (json) return finalizeResult(json)
 
   // 4. TOML / key = "value"
   const toml = tryParseTomlLike(cleaned)
-  if (toml) return toml
+  if (toml) return finalizeResult(toml)
 
   // 5. Env vars
   const env = tryParseEnv(cleaned)
-  if (env) return env
+  if (env) return finalizeResult(env)
 
   // 6. Mixed noise extraction
-  return tryParseMixed(cleaned)
+  return finalizeResult(tryParseMixed(cleaned))
+}
+
+/**
+ * Strip Discourse/selection noise that breaks key/base64 matching.
+ * @param {string} text
+ */
+function normalizeShareText(text) {
+  return String(text)
+    // ZWSP/ZWNJ/ZWJ, BOM, soft-hyphen, word-joiner
+    .replace(/[\u200B-\u200D\uFEFF\u00AD\u2060]/g, '')
+    // nbsp / narrow nbsp / figure space
+    .replace(/[\u00A0\u202F\u2007]/g, ' ')
+    .replace(/\r\n?/g, '\n')
+    .trim()
+}
+
+/**
+ * Re-join base64 tokens broken by spaces/newlines if the join decodes to a key.
+ * @param {string} text
+ */
+function repairBrokenBase64(text) {
+  // spaces inside an otherwise base64-ish run
+  let out = text.replace(
+    /(?:^|[\s"'`])((?:[A-Za-z0-9+/_-]{6,}={0,2}[\s\u00AD]+){1,}[A-Za-z0-9+/_-]{6,}={0,2})(?=$|[\s"'`])/gm,
+    (full, group) => {
+      const prefix = full.slice(0, full.length - group.length)
+      const joined = group.replace(/[\s\u00AD]+/g, '')
+      if (joined.length < 24) return full
+      try {
+        const d = base64Decode(joined).trim()
+        if (/^(sk-ant-|sk-|g2a_)/i.test(d) && !/\s/.test(d) && d.length >= 8) {
+          return prefix + joined
+        }
+      } catch {
+        /* keep */
+      }
+      return full
+    },
+  )
+  // adjacent pure-base64 lines
+  out = out.replace(
+    /(^|\n)([A-Za-z0-9+/_-]{12,}={0,2})\n([A-Za-z0-9+/_-]{12,}={0,2})(?=\n|$)/gm,
+    (full, lead, a, b) => {
+      const joined = a + b
+      try {
+        const d = base64Decode(joined).trim()
+        if (/^(sk-ant-|sk-|g2a_)/i.test(d) && !/\s/.test(d)) return `${lead}${joined}`
+      } catch {
+        /* keep */
+      }
+      return full
+    },
+  )
+  return out
+}
+
+/** Final pass: ensure apiKey is decoded and cleaned. */
+function finalizeResult(result) {
+  if (!result) return null
+  if (result.apiKey) {
+    result.apiKey = maybeDecodeKey(normalizeShareText(result.apiKey))
+  }
+  if (result.endpoint) {
+    result.endpoint = cleanUrl(normalizeShareText(result.endpoint))
+  }
+  return result
 }
 
 /**
@@ -122,13 +188,18 @@ function parseShareText(text) {
  */
 function looksLikeConfig(text) {
   if (!text || text.trim().length < MIN_SELECTION_LEN) return false
-  const t = text.trim()
+  const t = repairBrokenBase64(normalizeShareText(text))
   if (DEEPLINK_RE.test(t)) return true
-  if (/ANTHROPIC_|OPENAI_|CODEX_|BASE_URL|API_KEY|apiKey|baseUrl|endpoint/i.test(t)) return true
+  if (/ANTHROPIC_|OPENAI_|CODEX_|BASE_URL|API_KEY|apiKey|baseUrl|endpoint|Base\s*URL/i.test(t))
+    return true
   if (/sk-ant-|sk-[A-Za-z0-9]{16,}/.test(t)) return true
   if (/https?:\/\//i.test(t) && /sk-|Bearer\s+/i.test(t)) return true
-  // labeled shares: url： / key： / 密钥： (fullwidth colon common on CN forums)
-  if (/(?:url|base[_-]?url|endpoint|key|api[_-]?key|token|密钥|地址|接口)\s*[:：]/i.test(t)) {
+  // labeled shares: url： / key： / 密钥： / API Key（...）
+  if (
+    /(?:url|base[_-]?url|base\s*url|endpoint|key|api[_-]?key|api\s*key|token|密钥|地址|接口)/i.test(
+      t,
+    )
+  ) {
     if (/https?:\/\//i.test(t) || /[A-Za-z0-9_+\-/]{16,}/.test(t)) return true
   }
   // url + base64-ish token (key often base64-encoded on linux.do)
@@ -705,6 +776,16 @@ function extractLabeledFields(text) {
     const line = raw.trim()
     if (!line) continue
 
+    // "API Key（Base64，请自行解码）c2st..." glued value on same line
+    const keyGlued = line.match(
+      /^(?:api\s*key|api[_-]?key|key|token|secret|auth[_-]?token|密钥)(?:\s*[（(][^）)]*[）)])?\s*[:：]?\s*([A-Za-z0-9+/_-]{16,}={0,2})\s*$/i,
+    )
+    if (keyGlued && !result.apiKey) {
+      result.apiKey = maybeDecodeKey(keyGlued[1])
+      result.hit = true
+      continue
+    }
+
     // "API Key（Base64，请自行解码）" — label only, value on following line(s)
     // Allow optional trailing notes in fullwidth/halfwidth parens.
     const keyLabelOnly = line.match(
@@ -712,10 +793,25 @@ function extractLabeledFields(text) {
     )
     if (keyLabelOnly && !result.apiKey) {
       for (let j = i + 1; j < Math.min(i + 5, lines.length); j++) {
-        const next = lines[j].trim()
+        let next = lines[j].trim()
         if (!next) continue
         // stop if next line looks like another label
         if (isUrlLabel(next) || isKeyLabel(next) || isNameLabel(next)) break
+        // strip leftover label prefix if Discourse glued poorly
+        next = next.replace(
+          /^(?:api\s*key|api[_-]?key|key|token|密钥)(?:\s*[（(][^）)]*[）)])?\s*[:：]?\s*/i,
+          '',
+        )
+        // join pure base64 continuation lines
+        let k = j + 1
+        while (
+          k < Math.min(i + 6, lines.length) &&
+          /^[A-Za-z0-9+/_-]{8,}={0,2}$/.test(lines[k].trim())
+        ) {
+          next += lines[k].trim()
+          k++
+        }
+        next = next.replace(/\s+/g, '')
         if (lookLikeKeyValue(next) && !/^https?:\/\//i.test(next)) {
           result.apiKey = maybeDecodeKey(next)
           result.hit = true
@@ -809,13 +905,17 @@ function extractLabeledFields(text) {
  */
 function maybeDecodeKey(value) {
   if (!value) return value
-  const v = String(value).trim()
+  // remove invisible chars / whitespace that Discourse injects into long keys
+  let v = String(value)
+    .replace(/[\u200B-\u200D\uFEFF\u00AD\u2060]/g, '')
+    .replace(/[\s\u00A0]+/g, '')
+    .trim()
   // already looks like a normal key
-  if (/^(sk-ant-|sk-|g2a_|Bearer\s)/i.test(v)) {
-    return v.replace(/^Bearer\s+/i, '')
+  if (/^(sk-ant-|sk-|g2a_|Bearer\s*)/i.test(v)) {
+    return v.replace(/^Bearer\s*/i, '')
   }
-  // base64-ish (length multiple-ish, charset, often ends with =)
-  if (!/^[A-Za-z0-9+/_-]+={0,2}$/.test(v) || v.length < 20) return v
+  // base64-ish (charset, often ends with =)
+  if (!/^[A-Za-z0-9+/_-]+={0,2}$/.test(v) || v.length < 16) return v
   try {
     const decoded = base64Decode(v).trim()
     // decoded should look like a token: printable, no spaces, reasonable length
@@ -827,7 +927,11 @@ function maybeDecodeKey(value) {
       /[A-Za-z0-9]/.test(decoded)
     ) {
       // prefer decoded when it looks more like a key than the raw b64
-      if (/^(sk-ant-|sk-|g2a_)/i.test(decoded) || decoded.includes('_') || decoded.length < v.length) {
+      if (
+        /^(sk-ant-|sk-|g2a_)/i.test(decoded) ||
+        decoded.includes('_') ||
+        decoded.length < v.length
+      ) {
         return decoded
       }
     }
@@ -1275,7 +1379,8 @@ function base64Decode(b64) {
     const conf = Math.round((result.confidence || 0) * 100)
     shadow.getElementById('meta').textContent =
       `识别：${result.source} · 置信度 ${conf}%` +
-      (result.candidateCount > 1 ? ` · 候选×${result.candidateCount}` : '')
+      (result.candidateCount > 1 ? ` · 候选×${result.candidateCount}` : '') +
+      ' · v1.0.1'
 
     const fields = shadow.getElementById('fields')
     fields.innerHTML = `

@@ -267,7 +267,8 @@
     const conf = Math.round((result.confidence || 0) * 100)
     shadow.getElementById('meta').textContent =
       `识别：${result.source} · 置信度 ${conf}%` +
-      (result.candidateCount > 1 ? ` · 候选×${result.candidateCount}` : '')
+      (result.candidateCount > 1 ? ` · 候选×${result.candidateCount}` : '') +
+      ' · v1.0.1'
 
     const fields = shadow.getElementById('fields')
     fields.innerHTML = `

@@ -156,6 +156,29 @@ c2stdGVzdC1vbmx5LTAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAw
     assert.ok(r.app === null || r.app === 'codex' || r.app === 'claude')
   })
 
+  it('handles Discourse noise: zwsp, soft-hyphen, spaced base64, glued label', () => {
+    const b64 =
+      'c2stdGVzdC1vbmx5LTAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAw'
+    const expected =
+      'sk-test-only-000000000000000000000000'
+    const cases = [
+      // glued label+value
+      `API Key（Base64，请自行解码）${b64}\nBase URL https://api.example.invalid`,
+      // zwsp before key
+      'Base URL https://api.example.invalid\nAPI Key（Base64，请自行解码）\n​' + b64,
+      // space-split base64
+      `Base URL https://api.example.invalid\nAPI Key（Base64，请自行解码）\n${b64.slice(0, 40)} ${b64.slice(40)}`,
+      // soft hyphen inside base64
+      `Base URL https://api.example.invalid\nAPI Key（Base64，请自行解码）\n${b64.slice(0, 30)}­${b64.slice(30)}`,
+    ]
+    for (const text of cases) {
+      const r = parseShareText(text)
+      assert.ok(r, 'expected parse result')
+      assert.equal(r.endpoint, 'https://api.example.invalid')
+      assert.equal(r.apiKey, expected)
+    }
+  })
+
   it('returns null for pure prose', () => {
     const r = parseShareText(
       '今天天气不错，我们来讨论一下如何学习 Linux 内核以及写驱动的心得体会吧朋友们',
