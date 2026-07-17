@@ -1,42 +1,75 @@
 # CC Switch Importer for linux.do
 
-在 [linux.do](https://linux.do) 上**选中**别人分享的 API 配置文本，点击「导入 ccSwitch」，脚本会本地解析并生成 [`ccswitch://`](https://github.com/farion1231/cc-switch) 深链，一键唤起本机 [CC Switch](https://github.com/farion1231/cc-switch) 导入到 **Claude Code** 或 **Codex** 供应商栏。
+> **本仓库文档与代码由 AI 辅助生成（Claude Code）。**  
+> Generated with AI assistance · 请自行审查后使用
 
-## 功能
+在 [linux.do](https://linux.do) 上**选中**他人分享的 API 配置文本，点击「导入 ccSwitch」，脚本在本地解析后生成 [`ccswitch://`](https://github.com/farion1231/cc-switch) 深链，唤起本机 [CC Switch](https://github.com/farion1231/cc-switch)，导入到 **Claude Code** 或 **Codex** 供应商。
 
-- 仅在 `linux.do` / `www.linux.do` 生效
-- **选中文本 → 悬浮按钮 → 确认卡 → 打开深链**（不会偷偷读剪贴板）
-- 支持常见分享格式（可夹杂中文说明）：
-  1. `ccswitch://v1/import?...` 深链
-  2. Base64 编码的 JSON / env 配置
-  3. JSON 对象（`baseUrl` / `endpoint` + `apiKey` 等）
-  4. 环境变量（`ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN` 等）
-  5. TOML / `key = "value"` 风格
-  6. 混排纯文本中的 URL + `sk-` / `sk-ant-` key
-- 自动识别 Claude Code / Codex；无法判断时需手动选择
-- 唤起失败时自动复制深链到剪贴板
-- **纯本地解析**，不上传任何密钥
+---
+
+## 功能一览
+
+| 能力 | 说明 |
+|------|------|
+| 触发方式 | 选中文本 → 悬浮按钮 → 确认卡（不监听剪贴板） |
+| 作用站点 | 仅 `linux.do` / `www.linux.do` |
+| 目标应用 | 自动识别 Claude Code / Codex；不明时手选 |
+| 模型识别 | 从文案提取 `gpt-*` / `claude-*` / `grok-*` 等，写入深链 `model` 等参数；仅一个模型时自动作为默认 |
+| 导入方式 | `ccswitch://v1/import?...`；唤起失败则复制深链 |
+| 隐私 | 纯本地解析，不上传密钥；确认卡中 Key 脱敏 |
+
+### 支持的分享格式
+
+1. **官方深链** — `ccswitch://v1/import?...`
+2. **Base64** — 整段配置或单独的 Key（自动解码 `sk-` / `g2a_` 等）
+3. **JSON** — `baseUrl` / `endpoint` + `apiKey` 等
+4. **环境变量** — `ANTHROPIC_BASE_URL`、`ANTHROPIC_AUTH_TOKEN`、`OPENAI_*` 等
+5. **TOML / key=value** — `base_url = "..."`、`api_key = "..."`
+6. **混排文本** — 中文说明 + URL + Key（含全角冒号 `url：` / `key：`、表格 `Base URL    https://...`、标签与 Base64 分行）
+
+---
 
 ## 安装
 
 1. 安装 [Tampermonkey](https://www.tampermonkey.net/)（Chrome / Edge / Firefox）
-2. 本机已安装并至少运行过一次 [CC Switch](https://github.com/farion1231/cc-switch/releases)（用于注册 `ccswitch://` 协议）
-3. 打开脚本文件  
-   [`userscript/ccswitch-linuxdo-importer.user.js`](./userscript/ccswitch-linuxdo-importer.user.js)  
-   用浏览器打开，或在 Tampermonkey 面板 →「添加新脚本」→ 粘贴全文 → 保存
+2. 安装并至少运行过一次 [CC Switch](https://github.com/farion1231/cc-switch/releases)（注册 `ccswitch://`）
+3. 安装用户脚本（任选其一）：
+   - **推荐**：打开  
+     [raw 脚本（一键安装）](https://raw.githubusercontent.com/Super-YYQ/ccswitch-linuxdo-importer/main/userscript/ccswitch-linuxdo-importer.user.js)  
+     由 Tampermonkey 捕获并安装
+   - 或复制 [`userscript/ccswitch-linuxdo-importer.user.js`](./userscript/ccswitch-linuxdo-importer.user.js) 全文到「添加新脚本」
 4. 访问 https://linux.do ，在帖子中选中一段配置文字
+
+确认安装版本：打开确认卡后，元信息末尾应显示 **v1.0.2**。
+
+---
 
 ## 使用
 
-1. 用鼠标选中包含 API 地址 / Key / 配置块的文本（可带中文说明）
-2. 出现蓝色悬浮按钮 **「导入 ccSwitch」** → 点击
-3. 确认卡中检查 `endpoint` / 脱敏后的 `apiKey`，必要时切换 Claude / Codex
-4. 点 **「打开导入」** 唤起 CC Switch；若无反应，深链已复制，可粘贴到地址栏或检查协议是否注册
+1. 选中含 API 地址 / Key / 配置块的文本（可含中文说明）
+2. 点击蓝色悬浮按钮 **「导入 ccSwitch」**
+3. 在确认卡检查：
+   - `endpoint` / 脱敏 `apiKey`
+   - `model`（若文案中有模型名）
+   - Claude Code / Codex 目标栏
+4. 点 **「打开导入」** 唤起 CC Switch  
+   若无反应：深链已复制，可粘贴到地址栏，或检查 CC Switch 是否已注册协议
 5. 也可点 **「复制深链」** 手动处理
+
+### 模型自动配置规则
+
+| 情况 | 行为 |
+|------|------|
+| 文案中只出现 **1 个** 可识别模型 | 自动作为默认 `model` 写入深链 |
+| 出现 **多个** 模型 | 优先 sonnet / 主模型写入 `model`；Claude 下额外尝试 `haikuModel` / `sonnetModel` / `opusModel` |
+| 只有「支持所有模型」等描述、无具体 ID | 不写入模型参数 |
+| 深链参数 | 使用官方协议：`model`、`haikuModel`、`sonnetModel`、`opusModel`（见 [CC Switch 深链文档](https://github.com/farion1231/cc-switch/blob/main/docs/user-manual/en/5-faq/5.3-deeplink.md)） |
+
+---
 
 ## 解析示例
 
-**环境变量 + 中文噪声：**
+**环境变量 + 中文噪声**
 
 ```text
 分享一个可用的：
@@ -45,44 +78,72 @@ ANTHROPIC_AUTH_TOKEN=sk-ant-api03-xxxx
 别外传。
 ```
 
-**JSON：**
+**表格 + Base64 Key（常见于 linux.do）**
+
+```text
+Base URL    https://example.com
+API Key（Base64，请自行解码）
+c2st...==
+模型设置    gpt-5.5，claude-3.5-sonnet
+```
+
+**全角标签**
+
+```text
+url：https://grok.example.net
+key：ZzJhX...==
+```
+
+**JSON**
 
 ```json
 {"name":"MyRelay","baseUrl":"https://relay.example.com","apiKey":"sk-ant-api03-xxxx"}
 ```
 
-**混排：**
-
-```text
-地址是 https://mid.example.org/anthropic 密钥 sk-ant-api03-xxxx 自己测试。
-```
+---
 
 ## 开发
 
 ```bash
-# 单元测试（解析 / 分类 / 深链）
+# 单元测试
 npm test
 
-# 从 core + UI 重新打包油猴单文件
+# 从 lib + UI 重新打包油猴单文件
 npm run build
 ```
 
 | 路径 | 说明 |
 |------|------|
-| `userscript/lib/core.mjs` | 纯解析逻辑（Node 可测） |
-| `userscript/ui-main.js` | 选区 / 浮层 / 唤起 |
+| `userscript/lib/core.mjs` | 配置解析 / 分类 / 深链 |
+| `userscript/lib/model-extractor.mjs` | 模型名提取 |
+| `userscript/ui-main.js` | 选区 / 确认卡 / 唤起 |
 | `userscript/ccswitch-linuxdo-importer.user.js` | **安装用产物**（`npm run build` 生成） |
-| `tests/parser.test.mjs` | 解析单测 |
-| `docs/superpowers/specs/` | 设计说明 |
+| `tests/*.test.mjs` | 单测 |
+| `docs/superpowers/` | 设计与计划 |
 
-修改 `core.mjs` 或 `ui-main.js` 后务必 `npm run build`，再更新 Tampermonkey 中的脚本。
+修改源码后务必 `npm run build`，再在 Tampermonkey 中更新脚本。
+
+---
 
 ## 安全说明
 
-- 仅在你主动选中并点击后处理文本
-- 确认卡中 Key 会脱敏显示（`sk-ant-****xxxx`）
-- 不要在公共场合长期展示含真实 Key 的选区截图
+- 仅在用户**主动选中并点击**后处理文本
+- Key 在确认卡中脱敏（如 `sk-ant-****xxxx`）
+- 勿在公共场合长期展示含真实 Key 的截图
+- 本仓库示例中的密钥均为格式样例；真实额度请勿提交到公开仓库
+
+---
+
+## 变更摘要
+
+- **v1.0.2** — 模型自动识别并写入深链；README 重排；作者信息匿名化
+- **v1.0.1** — Discourse 表格 / Base64 分行 / 零宽字符等抗噪声
+- **v1.0.0** — 首版油猴导入
+
+---
 
 ## License
 
-MIT
+MIT · © 2026 CC Switch Importer Contributors
+
+> 本 README 与项目主体由 AI 辅助编写，贡献者可自行 fork / 修改。

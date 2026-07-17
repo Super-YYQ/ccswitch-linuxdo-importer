@@ -223,6 +223,29 @@ describe('buildDeeplink', () => {
     assert.match(link, /apiKey=/)
   })
 
+  it('includes model params when provided', () => {
+    const link = buildDeeplink(
+      {
+        name: 'Test',
+        app: 'claude',
+        endpoint: 'https://api.example.com',
+        apiKey: 'sk-ant-api03-x',
+      },
+      'claude',
+      {
+        model: 'claude-3.5-sonnet',
+        haikuModel: 'claude-3-haiku',
+        sonnetModel: 'claude-3.5-sonnet',
+        opusModel: 'claude-3-opus',
+        models: ['claude-3.5-sonnet', 'claude-3-haiku', 'claude-3-opus'],
+      },
+    )
+    assert.match(link, /model=claude-3\.5-sonnet/)
+    assert.match(link, /haikuModel=claude-3-haiku/)
+    assert.match(link, /sonnetModel=claude-3\.5-sonnet/)
+    assert.match(link, /opusModel=claude-3-opus/)
+  })
+
   it('throws without app', () => {
     assert.throws(() =>
       buildDeeplink({

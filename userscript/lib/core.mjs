@@ -51,7 +51,8 @@ const DEEPLINK_RE = /ccswitch:\/\/[^\s"'`<>]+/i
  *   confidence: number,
  *   candidateCount: number,
  *   warnings: string[],
- *   deeplink?: string|null
+ *   deeplink?: string|null,
+ *   models?: string[]
  * }} ParseResult
  */
 
@@ -192,9 +193,10 @@ export function looksLikeConfig(text) {
 /**
  * @param {ParseResult} result
  * @param {AppKind} [appOverride]
+ * @param {object} [modelInfo] - Optional model extraction result
  * @returns {string}
  */
-export function buildDeeplink(result, appOverride) {
+export function buildDeeplink(result, appOverride, modelInfo) {
   const app = appOverride || result.app
   if (!app) {
     throw new Error('app is required (claude or codex)')
@@ -211,6 +213,16 @@ export function buildDeeplink(result, appOverride) {
   if (result.config) {
     params.set('config', base64Encode(result.config))
     params.set('configFormat', result.configFormat || 'json')
+  }
+
+  // Add model parameters when available
+  if (modelInfo) {
+    if (modelInfo.model) params.set('model', modelInfo.model)
+    if (app === 'claude') {
+      if (modelInfo.haikuModel) params.set('haikuModel', modelInfo.haikuModel)
+      if (modelInfo.sonnetModel) params.set('sonnetModel', modelInfo.sonnetModel)
+      if (modelInfo.opusModel) params.set('opusModel', modelInfo.opusModel)
+    }
   }
 
   // URLSearchParams encodes spaces as +, deep links often prefer %20 — fine for most handlers

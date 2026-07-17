@@ -10,6 +10,7 @@
   let hideTimer = null
   let selectedApp = null
   let currentResult = null
+  let currentModelInfo = null
   let currentDeeplink = null
 
   function $(sel, root) {
@@ -234,6 +235,12 @@
       return
     }
     currentResult = result
+    // Extract models from original selection (single model auto-applies via modelInfo.model)
+    currentModelInfo =
+      typeof extractModels === 'function' ? extractModels(text) : { model: null, models: [] }
+    if (currentModelInfo.models && currentModelInfo.models.length === 1 && !currentModelInfo.model) {
+      currentModelInfo.model = currentModelInfo.models[0]
+    }
     selectedApp = result.app
     rebuildDeeplink()
     renderCard(result)
@@ -265,22 +272,37 @@
     shadow.getElementById('copy').disabled = false
 
     const conf = Math.round((result.confidence || 0) * 100)
+    const modelCount = currentModelInfo?.models?.length || 0
     shadow.getElementById('meta').textContent =
       `识别：${result.source} · 置信度 ${conf}%` +
       (result.candidateCount > 1 ? ` · 候选×${result.candidateCount}` : '') +
-      ' · v1.0.1'
+      (modelCount ? ` · 模型×${modelCount}` : '') +
+      ' · v1.0.2'
+
+    const modelLine = currentModelInfo?.model
+      ? escapeHtml(currentModelInfo.model) +
+        (modelCount > 1
+          ? ` <span style="opacity:.65">(+${modelCount - 1})</span>`
+          : '')
+      : modelCount
+        ? escapeHtml(currentModelInfo.models.slice(0, 3).join(', ')) +
+          (modelCount > 3 ? '…' : '')
+        : '—'
 
     const fields = shadow.getElementById('fields')
     fields.innerHTML = `
       <div><span class="k">name</span>${escapeHtml(result.name || '')}</div>
       <div><span class="k">endpoint</span>${escapeHtml(result.endpoint || '—')}</div>
       <div><span class="k">apiKey</span>${escapeHtml(maskKey(result.apiKey || '') || '—')}</div>
+      <div><span class="k">model</span>${modelLine}</div>
       <div><span class="k">app</span>${escapeHtml(selectedApp || '未选择')}</div>
     `
 
     const warn = shadow.getElementById('warn')
     const warnings = [...(result.warnings || [])]
     if (!selectedApp) warnings.push('请选择导入到 Claude Code 或 Codex')
+    if (modelCount === 1) warnings.push('已自动填入检测到的唯一模型')
+    else if (modelCount > 1) warnings.push(`检测到 ${modelCount} 个模型，已优先使用主模型写入深链`)
     warn.textContent = warnings.join('；')
 
     syncAppButtons()
@@ -304,8 +326,7 @@
     currentDeeplink = null
     if (!currentResult || !selectedApp) return
     try {
-      // If original deeplink already targets same app and has params, still rebuild for consistency
-      currentDeeplink = buildDeeplink(currentResult, selectedApp)
+      currentDeeplink = buildDeeplink(currentResult, selectedApp, currentModelInfo)
     } catch (e) {
       currentDeeplink = null
     }
