@@ -290,6 +290,50 @@ key base64`
     assert.equal(r.apiKey, 'sk-test-only-111111111111111111111111')
     assert.ok(!String(r.endpoint).includes('"'))
   })
+
+  it('recovers tp- key from CJK-glued base64 (no whitespace boundary)', () => {
+    // Real linux.do share: base64 key glued after Chinese prose (…佬友们用dHAt…),
+    // decodes to tp-… (token-plan style), not sk-/g2a_.
+    const b64 =
+      'dHAtdGVzdC1vbmx5LW5vdC1hLXJlYWwtdG9rZW4tYWJjZGVmaGowMQ=='
+    const expected = 'tp-test-only-not-a-real-token-abcdefghij01'
+    const text = `自己买的这个都没咋用 之前一分钱续费的 最近使用的grok 丢出来给需要的佬友们用${b64}
+目前还有 913,514,660 / 11,000,000,000已使用 8.0%
+
+我看有佬问url我以为大家都知道统一贴一下
+兼容 OpenAI 接口协议：
+
+https://api.example.invalid/v1
+
+兼容 Anthropic 接口协议：
+
+https://api.example.invalid/anthropic`
+    assert.equal(looksLikeConfig(text), true)
+    const r = parseShareText(text)
+    assert.ok(r)
+    assert.equal(r.apiKey, expected)
+    assert.ok(
+      r.endpoint === 'https://api.example.invalid/v1' ||
+        r.endpoint === 'https://api.example.invalid/anthropic',
+    )
+  })
+
+  it('accepts plain / spaced base64 that peels to tp- keys', () => {
+    const b64 =
+      'dHAtdGVzdC1vbmx5LW5vdC1hLXJlYWwtdG9rZW4tYWJjZGVmaGowMQ=='
+    const expected = 'tp-test-only-not-a-real-token-abcdefghij01'
+    const cases = [
+      `${b64}\nhttps://api.example.invalid/v1`,
+      `佬友们用 ${b64}\nhttps://api.example.invalid/v1`,
+      `key: ${expected}\nhttps://api.example.invalid/v1`,
+    ]
+    for (const text of cases) {
+      const r = parseShareText(text)
+      assert.ok(r, `expected parse for: ${text.slice(0, 40)}…`)
+      assert.equal(r.apiKey, expected)
+      assert.equal(r.endpoint, 'https://api.example.invalid/v1')
+    }
+  })
 })
 
 describe('enrichTextWithAnchorHrefs', () => {

@@ -21,7 +21,7 @@
 ### 支持的分享格式
 
 1. **官方深链** — `ccswitch://v1/import?...`
-2. **Base64** — 整段配置或单独的 Key（自动解码 `sk-` / `g2a_` 等）
+2. **Base64** — 整段配置或单独的 Key（自动解码 `sk-` / `g2a_` / `tp-` 等）
 3. **JSON** — `baseUrl` / `endpoint` + `apiKey` 等
 4. **环境变量** — `ANTHROPIC_BASE_URL`、`ANTHROPIC_AUTH_TOKEN`、`OPENAI_*` 等
 5. **TOML / key=value** — `base_url = "..."`、`api_key = "..."`
@@ -141,6 +141,7 @@ npm run check
 
 ## 变更摘要
 
+- **v1.1.4** — 识别 `tp-`（token-plan 等）Key 前缀；中文粘连 Base64（`…佬友们用dHAt…`）也能抽出 Key
 - **v1.1.3** — 支持「俩次 base64」嵌套解码（多层 peel 到 `sk-` / `g2a_`）；识别 `base64：` / `俩次base64：` 标签
 - **v1.1.2** — 精简 A：统一 `normalizeApiKey` 出口；合并 labeled/table 扫描（标签表单源）；前缀提示改为内部函数（行为不变）
 - **v1.1.1** — Base64/Hex Key 解码后根据文案「别忘了 sk- 前缀」等提示自动补 `sk-` / `sk-ant-` / `g2a_`；确认卡提示已补前缀

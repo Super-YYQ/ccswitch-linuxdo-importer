@@ -34,8 +34,15 @@ const URL_RE = /https?:\/\/[^\s"'`<>，。；、）)\]}]+/gi
 const SK_ANT_RE = /sk-ant-[A-Za-z0-9_\-]{10,}/g
 const SK_RE = /sk-[A-Za-z0-9_\-]{16,}/g
 const BEARER_RE = /Bearer\s+([A-Za-z0-9_\-.]{16,})/gi
-const BASE64_RE = /(?:^|[\s"'`])([A-Za-z0-9+/]{40,}={0,2})(?:$|[\s"'`])/g
+// CJK / fullwidth punct count as token boundaries — linux.do often glues base64 after Chinese prose
+const B64_BOUNDARY_L = '(?:^|[\\s"\'`：:，。；、！？]|(?<=[一-鿿]))'
+const B64_BOUNDARY_R = '(?:$|[\\s"\'`，。；、！？]|(?=[一-鿿]))'
+const BASE64_RE = new RegExp(`${B64_BOUNDARY_L}([A-Za-z0-9+/]{40,}={0,2})${B64_BOUNDARY_R}`, 'g')
 const DEEPLINK_RE = /ccswitch:\/\/[^\s"'`<>]+/i
+// Known API key prefixes (sk-/g2a_/tp- token-plan, plus rare vendor tags)
+const KEY_PREFIX_RE = /^(sk-ant-|sk-|g2a_|tp-|nk-|pk-|rk-)/i
+const KEY_PREFIX_BODY_RE = /^(sk-ant-|sk-|g2a_|tp-|nk-|pk-|rk-|Bearer\s)/i
+const VENDOR_KEY_RE = /\b(?:g2a_|tp-|nk-|pk-|rk-)[A-Za-z0-9_\-]{8,}\b/g
 
 /**
  * @typedef {'claude'|'codex'|null} AppKind
@@ -282,7 +289,7 @@ export function repairBrokenBase64(text) {
       if (joined.length < 24) return full
       try {
         const d = base64Decode(joined).trim()
-        if (/^(sk-ant-|sk-|g2a_)/i.test(d) && !/\s/.test(d) && d.length >= 8) {
+        if (KEY_PREFIX_RE.test(d) && !/\s/.test(d) && d.length >= 8) {
           return prefix + joined
         }
       } catch {
@@ -298,7 +305,7 @@ export function repairBrokenBase64(text) {
       const joined = a + b
       try {
         const d = base64Decode(joined).trim()
-        if (/^(sk-ant-|sk-|g2a_)/i.test(d) && !/\s/.test(d)) return `${lead}${joined}`
+        if (KEY_PREFIX_RE.test(d) && !/\s/.test(d)) return `${lead}${joined}`
       } catch {
         /* keep */
       }
@@ -345,7 +352,7 @@ function finalizeResult(result, text = '') {
   if (result.apiKey && beforeKey) {
     const bodyOnly = decodeKeyBody(beforeKey)
     if (hasKeyPrefix(result.apiKey) && bodyOnly && !hasKeyPrefix(bodyOnly) && result.apiKey !== bodyOnly) {
-      const prefix = (result.apiKey.match(/^(sk-ant-|sk-|g2a_)/i) || [])[1] || 'sk-'
+      const prefix = (result.apiKey.match(KEY_PREFIX_RE) || [])[1] || 'sk-'
       const note = `已根据文案补上 ${prefix} 前缀`
       if (!result.warnings) result.warnings = []
       if (!result.warnings.includes(note)) result.warnings.push(note)
@@ -384,7 +391,7 @@ function applyKeyPrefixHints(key, text) {
   if (!key) return key
   let k = String(key).trim()
   if (!k) return k
-  if (/^(sk-ant-|sk-|g2a_|Bearer\s)/i.test(k)) {
+  if (KEY_PREFIX_BODY_RE.test(k)) {
     return sanitizeApiKey(k.replace(/^Bearer\s*/i, ''))
   }
   const prefix = detectKeyPrefixHint(text)
@@ -427,7 +434,7 @@ export function looksLikeConfig(text) {
  * @param {string} text
  */
 function hasUsefulBase64Blob(text) {
-  const re = /(?:^|[\s"'`：:：])([A-Za-z0-9+/]{40,}={0,2})(?=$|[\s"'`])/g
+  const re = new RegExp(`${B64_BOUNDARY_L}([A-Za-z0-9+/]{40,}={0,2})${B64_BOUNDARY_R}`, 'g')
   let m
   while ((m = re.exec(text)) !== null) {
     const token = m[1]
@@ -436,7 +443,7 @@ function hasUsefulBase64Blob(text) {
       const decoded = base64Decode(token).trim()
       if (!decoded || decoded.length < 8) continue
       const ascii = decoded.replace(/[^\x20-\x7E]/g, '').replace(/\s+/g, '')
-      if (/^(sk-ant-|sk-|g2a_)/i.test(ascii) && ascii.length >= 8 && ascii.length <= 512) {
+      if (KEY_PREFIX_RE.test(ascii) && ascii.length >= 8 && ascii.length <= 512) {
         return true
       }
       if (
@@ -1170,7 +1177,7 @@ function scorePair(pair, preferredUrl, preferredKey, text) {
   if (pair.apiKey) {
     if (pair.apiKey.startsWith('sk-ant-')) s += 2
     else if (pair.apiKey.startsWith('sk-')) s += 1
-    else if (/^g2a_/i.test(pair.apiKey)) s += 1
+    else if (/^(?:g2a_|tp-)/i.test(pair.apiKey)) s += 1
   }
   // slight preference for shorter path endpoints (often the real base)
   if (pair.endpoint) {
@@ -1215,7 +1222,7 @@ function stripLabeledValue(value) {
 function lookLikeKeyValue(v) {
   return (
     !!v &&
-    (/^(sk-ant-|sk-|g2a_|Bearer\s)/i.test(v) ||
+    (KEY_PREFIX_BODY_RE.test(v) ||
       /^[A-Za-z0-9+/_-]{16,}={0,2}$/.test(v) ||
       v.length >= 12)
   )
@@ -1327,7 +1334,7 @@ function decodeKeyBody(value) {
     .replace(/[\u200B-\u200D\uFEFF\u00AD\u2060]/g, '')
     .replace(/[\s\u00A0]+/g, '')
     .trim()
-  if (/^(sk-ant-|sk-|g2a_|Bearer\s*)/i.test(v)) {
+  if (KEY_PREFIX_BODY_RE.test(v)) {
     return sanitizeApiKey(v.replace(/^Bearer\s*/i, ''))
   }
 
@@ -1346,7 +1353,7 @@ function decodeKeyBody(value) {
   return peelBase64Layers(v)
 }
 
-/** Peel nested base64 (e.g. 俩次base64) until sk-/g2a_ or layers stop. */
+/** Peel nested base64 (e.g. 俩次base64) until sk-/g2a_/tp- or layers stop. */
 function peelBase64Layers(value, maxDepth = 4) {
   let v = String(value || '').trim()
   if (!v) return v
@@ -1387,7 +1394,7 @@ function maybeDecodeKey(value) {
 }
 
 function hasKeyPrefix(s) {
-  return /^(sk-ant-|sk-|g2a_)/i.test(s)
+  return KEY_PREFIX_RE.test(s)
 }
 
 function isDecodableKeyBody(decoded) {
@@ -1427,11 +1434,7 @@ function sanitizeApiKey(key) {
     return k.replace(/\s+/g, '')
   }
   const stripped = k.replace(/[^\x20-\x7E]/g, '').replace(/\s+/g, '')
-  if (
-    stripped.length >= 8 &&
-    stripped.length <= 512 &&
-    /^(sk-ant-|sk-|g2a_)/i.test(stripped)
-  ) {
+  if (stripped.length >= 8 && stripped.length <= 512 && KEY_PREFIX_RE.test(stripped)) {
     return stripped
   }
   return k
@@ -1440,7 +1443,7 @@ function sanitizeApiKey(key) {
 /** Non-sk tokens after key labels, or base64 after "base64：" / "俩次base64" style notes. */
 function extractLooseKeys(text) {
   const out = []
-  const vendor = text.match(/\b(?:g2a_|nk-|pk-|rk-)[A-Za-z0-9_\-]{8,}\b/g)
+  const vendor = text.match(VENDOR_KEY_RE)
   if (vendor) out.push(...vendor)
 
   // key：… / 密钥：… / base64：… / 两次base64：…
@@ -1460,7 +1463,7 @@ function extractLooseKeys(text) {
 }
 
 /**
- * Standalone base64 tokens that peel to sk- / g2a_ keys (incl. double base64).
+ * Standalone base64 tokens that peel to sk- / g2a_ / tp- keys (incl. double base64).
  */
 function extractBase64DecodedKeys(text) {
   const out = []
@@ -1477,13 +1480,18 @@ function extractBase64DecodedKeys(text) {
       consider(t)
       continue
     }
+    // CJK-glued: …佬友们用dHAt… (no whitespace before base64)
+    const cjkGlued = t.match(
+      /(?:[一-鿿]|[\s"'`：:，。；、！？])([A-Za-z0-9+/]{32,}={0,2})\s*$/,
+    )
+    if (cjkGlued) consider(cjkGlued[1])
     const labeled = t.match(
       /(?:key|api[_-]?key|token|密钥|base\s*64|(?:俩|两|二)?次?\s*base\s*64)\s*[:：]\s*([A-Za-z0-9+/_-]{24,}={0,2})\s*$/i,
     )
     if (labeled) consider(labeled[1])
   }
 
-  const re = /(?:^|[\s"'`：:])([A-Za-z0-9+/]{32,}={0,2})(?=$|[\s"'`])/gm
+  const re = new RegExp(`${B64_BOUNDARY_L}([A-Za-z0-9+/]{32,}={0,2})${B64_BOUNDARY_R}`, 'gm')
   let m
   while ((m = re.exec(text)) !== null) consider(m[1])
   return unique(out)
@@ -1514,7 +1522,7 @@ function pickBestKey(keys) {
     let s = k.length / 100
     if (k.startsWith('sk-ant-')) s += 3
     else if (k.startsWith('sk-')) s += 2
-    else if (/^g2a_/i.test(k)) s += 2
+    else if (/^(?:g2a_|tp-)/i.test(k)) s += 2
     else if (/^[A-Za-z0-9+/]+={1,2}$/.test(k) && k.length >= 24) s += 0.5 // raw b64
     return { k, s }
   })
