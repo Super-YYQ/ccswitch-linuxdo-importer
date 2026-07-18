@@ -13,61 +13,54 @@
  * }} ModelResult
  */
 
-// Common model patterns seen on linux.do
-const MODEL_PATTERNS = {
-  // Claude models
-  claude: [
-    /claude-3\.5-sonnet(?:-\d{8})?/gi,
-    /claude-3-sonnet(?:-\d{8})?/gi,
-    /claude-3\.5-haiku(?:-\d{8})?/gi,
-    /claude-3-haiku(?:-\d{8})?/gi,
-    /claude-3-opus(?:-\d{8})?/gi,
-    /claude-sonnet-4\.5/gi,
-    /claude-sonnet-4/gi,
-    /claude-opus-4\.8/gi,
-    /claude-opus-4/gi,
-    /\bclaude-sonnet\b/gi,
-    /\bclaude-haiku\b/gi,
-    /\bclaude-opus\b/gi,
-  ],
-  // OpenAI / Codex models — require word boundaries so base64 blobs don't yield fake "o3"
-  openai: [
-    /gpt-5\.?6-sol/gi,
-    /gpt-5\.?5/gi,
-    /gpt-4\.?5[a-z-]*(?:turbo|preview)?/gi,
-    /gpt-4o(?:-mini|-preview)?/gi,
-    /gpt-4-turbo(?:-preview)?/gi,
-    /gpt-4-vision(?:-preview)?/gi,
-    /gpt-4(?:-\d{4})?/gi,
-    /gpt-3\.5-turbo(?:-\d{4})?/gi,
-    /\bo3(?:-mini)?\b/gi,
-    /\bo1(?:-mini|-preview)?\b/gi,
-  ],
-  // Grok — accept "Grok4.5" / "grok4.5" (no hyphen) common on linux.do titles.
-  // Boundaries avoid false hits like mygrok4.5x / grok4.50
-  grok: [
-    /(?<![a-z0-9])grok[-_]?4\.5(?![0-9])/gi,
-    /(?<![a-z0-9])grok[-_]?3\.5(?![0-9])/gi,
-    /(?<![a-z0-9])grok[-_]?4(?![0-9.])/gi,
-    /(?<![a-z0-9])grok[-_]?3(?![0-9.])/gi,
-    /(?<![a-z0-9])grok-beta\b/gi,
-    /(?<![a-z0-9])grok-2\b/gi,
-  ],
+/**
+ * Ordered specific → general. Overlaps are resolved by keeping the longest
+ * match at each span (e.g. claude-sonnet-4.5 wins over claude-sonnet-4).
+ * @type {RegExp[]}
+ */
+const MODEL_RES = [
+  // Claude (longer / more specific first)
+  /claude-3\.5-sonnet(?:-\d{8})?/gi,
+  /claude-3-sonnet(?:-\d{8})?/gi,
+  /claude-3\.5-haiku(?:-\d{8})?/gi,
+  /claude-3-haiku(?:-\d{8})?/gi,
+  /claude-3-opus(?:-\d{8})?/gi,
+  /claude-sonnet-4\.5/gi,
+  /claude-opus-4\.8/gi,
+  /claude-sonnet-4(?!\.\d)/gi,
+  /claude-opus-4(?!\.\d)/gi,
+  /\bclaude-sonnet\b/gi,
+  /\bclaude-haiku\b/gi,
+  /\bclaude-opus\b/gi,
+  // OpenAI
+  /gpt-5\.?6-sol/gi,
+  /gpt-5\.?5/gi,
+  /gpt-4\.?5[a-z-]*(?:turbo|preview)?/gi,
+  /gpt-4o(?:-mini|-preview)?/gi,
+  /gpt-4-turbo(?:-preview)?/gi,
+  /gpt-4-vision(?:-preview)?/gi,
+  /gpt-4(?:-\d{4})?(?![a-z0-9.])/gi,
+  /gpt-3\.5-turbo(?:-\d{4})?/gi,
+  /\bo3(?:-mini)?\b/gi,
+  /\bo1(?:-mini|-preview)?\b/gi,
+  // Grok — accept "Grok4.5" / "grok4.5" (no hyphen)
+  /(?<![a-z0-9])grok[-_]?4\.5(?![0-9])/gi,
+  /(?<![a-z0-9])grok[-_]?3\.5(?![0-9])/gi,
+  /(?<![a-z0-9])grok[-_]?4(?![0-9.])/gi,
+  /(?<![a-z0-9])grok[-_]?3(?![0-9.])/gi,
+  /(?<![a-z0-9])grok-beta\b/gi,
+  /(?<![a-z0-9])grok-2\b/gi,
   // Gemini
-  gemini: [
-    /gemini-2\.5-(?:pro|flash)/gi,
-    /gemini-2\.0-(?:flash|pro)/gi,
-    /gemini-1\.5-(?:pro|flash)/gi,
-    /gemini-pro/gi,
-    /gemini-flash/gi,
-  ],
-  // DeepSeek
-  deepseek: [
-    /deepseek-v3/gi,
-    /deepseek-coder(?:-v2)?/gi,
-    /deepseek-chat/gi,
-  ],
-}
+  /gemini-2\.5-(?:pro|flash)/gi,
+  /gemini-2\.0-(?:flash|pro)/gi,
+  /gemini-1\.5-(?:pro|flash)/gi,
+  /gemini-pro/gi,
+  /gemini-flash/gi,
+  // DeepSeek — require full minor when present so deepseek-v3.2 is not truncated
+  /deepseek-v3(?:\.\d+)?/gi,
+  /deepseek-coder(?:-v2)?/gi,
+  /deepseek-chat/gi,
+]
 
 /**
  * @param {string} text
@@ -82,34 +75,50 @@ export function extractModels(text) {
   const scanText = String(text)
     .replace(/[A-Za-z0-9+/_-]{24,}={0,2}/g, ' ')
     .replace(/\bsk-(?:ant-)?[A-Za-z0-9_-]{8,}\b/gi, ' ')
-    .replace(/\bg2a_[A-Za-z0-9_-]{8,}\b/gi, ' ')
+    .replace(/\b(?:g2a_|tp-|nk-|pk-|rk-)[A-Za-z0-9_-]{8,}\b/gi, ' ')
 
-  const found = new Set()
-
-  // Scan all patterns
-  for (const patterns of Object.values(MODEL_PATTERNS)) {
-    for (const re of patterns) {
-      const matches = scanText.matchAll(new RegExp(re.source, re.flags))
-      for (const m of matches) {
-        found.add(normalizeModelId(m[0]))
-      }
+  /** @type {Array<{start: number, end: number, value: string}>} */
+  const spans = []
+  for (const re of MODEL_RES) {
+    const r = new RegExp(re.source, re.flags.includes('g') ? re.flags : re.flags + 'g')
+    let m
+    while ((m = r.exec(scanText)) !== null) {
+      const value = normalizeModelId(m[0])
+      if (!value) continue
+      spans.push({ start: m.index, end: m.index + m[0].length, value })
     }
   }
 
-  const models = Array.from(found)
+  // Prefer longer matches; drop spans fully contained in a longer one
+  spans.sort((a, b) => b.end - b.start - (a.end - a.start) || a.start - b.start)
+  /** @type {Array<{start: number, end: number, value: string}>} */
+  const kept = []
+  for (const s of spans) {
+    const contained = kept.some((k) => s.start >= k.start && s.end <= k.end)
+    if (!contained) kept.push(s)
+  }
 
-  // Claude-specific: map to tier fields
+  // Stable unique list in document order
+  kept.sort((a, b) => a.start - b.start)
+  const models = []
+  const seen = new Set()
+  for (const s of kept) {
+    if (seen.has(s.value)) continue
+    seen.add(s.value)
+    models.push(s.value)
+  }
+
+  // Claude-specific: map to tier fields (prefer longer / more specific ids)
   let haikuModel = null
   let sonnetModel = null
   let opusModel = null
-
   for (const m of models) {
     if (/haiku/i.test(m)) {
-      haikuModel = m
+      if (!haikuModel || m.length > haikuModel.length) haikuModel = m
     } else if (/sonnet/i.test(m)) {
-      sonnetModel = m
+      if (!sonnetModel || m.length > sonnetModel.length) sonnetModel = m
     } else if (/opus/i.test(m)) {
-      opusModel = m
+      if (!opusModel || m.length > opusModel.length) opusModel = m
     }
   }
 
@@ -129,27 +138,27 @@ function normalizeModelId(raw) {
   let m = String(raw || '').toLowerCase().trim()
   // Grok: "Grok4.5" / "grok4.5" / "grok_4.5" → "grok-4.5"
   m = m.replace(/^grok[_-]?(\d)/, 'grok-$1')
+  // gpt5.5 → gpt-5.5 when hyphen missing
+  m = m.replace(/^gpt(\d)/, 'gpt-$1')
   return m
 }
 
 /**
- * Filter model list to only include models compatible with the given app.
+ * Soft preference sort for UI dropdowns. Relay shares mix vendors freely, so we
+ * never drop models by app — only put preferred families first.
  * @param {string[]} models
  * @param {'claude'|'codex'|null} app
  * @returns {string[]}
  */
 export function filterModelsForApp(models, app) {
-  if (!app || !models.length) return models
+  if (!app || !models.length) return models.slice()
 
-  if (app === 'claude') {
-    // Claude prefers claude-* models, but can forward others
-    return models.filter(m => /claude|grok|gemini|gpt/i.test(m))
-  }
+  const prefer =
+    app === 'claude'
+      ? (m) => /claude/i.test(m)
+      : app === 'codex'
+        ? (m) => /gpt|o1|o3|codex/i.test(m)
+        : () => false
 
-  if (app === 'codex') {
-    // Codex primarily uses OpenAI models
-    return models.filter(m => /gpt|o1|o3|deepseek|claude/i.test(m))
-  }
-
-  return models
+  return models.slice().sort((a, b) => Number(prefer(b)) - Number(prefer(a)))
 }
