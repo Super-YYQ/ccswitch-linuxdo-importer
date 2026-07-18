@@ -156,9 +156,11 @@ export function enrichTextWithAnchorHrefs(text, anchors) {
   const appended = []
   for (const item of toAdd) {
     if (item.preferred && item.label) {
-      // Replace bare label once with "label\uFF1Ahttps://..." so extractLabeledFields hits it
+      // Replace bare labels like "base url" with "base url\uFF1Ahttps://..." for labeled extract.
+      // Do NOT replace inside JSON quotes \u2014 Discourse often linkifies the JSON key/value
+      // "url", and rewriting `"url"` \u2192 `url\uFF1Ahttps://...` corrupts the object and drops fields.
       const labelRe = new RegExp(
-        `(${escapeRegExp(item.label)})(?!\\s*[:\uFF1A=]\\s*https?:)`,
+        `(?<!["'\\w./])(${escapeRegExp(item.label)})(?![\\w"'])(?!\\s*[:\uFF1A=]\\s*https?:)`,
         'i',
       )
       if (labelRe.test(out)) {
@@ -572,6 +574,12 @@ function tryParseJson(text) {
     if (!obj || typeof obj !== 'object' || Array.isArray(obj)) continue
     const fields = pickProviderFields(obj)
     if (!fields.endpoint && !fields.apiKey && !fields.hasConfigShape) continue
+    // Discourse may turn "url" value into bare link text "url" — recover real https from surrounding text
+    if (!fields.endpoint) {
+      const urls = unique(matchAll(text, URL_RE).map(cleanUrl)).filter((u) => isHttpUrl(u))
+      const recovered = pickBestUrl(urls, text)
+      if (recovered) fields.endpoint = recovered
+    }
     const app = classifyApp(text, fields)
     const r = emptyResult({
       name: fields.name || defaultName(),
@@ -586,7 +594,71 @@ function tryParseJson(text) {
     })
     if (!best || r.confidence > best.confidence) best = r
   }
+
+  // Broken / partial JSON (smart quotes, missing braces): still pull "key"/"url" string fields
+  if (!best || (!best.apiKey && !best.endpoint)) {
+    const loose = extractJsonishFields(text)
+    if (loose.hit && (loose.endpoint || loose.apiKey)) {
+      const fields = {
+        name: loose.name || defaultName(),
+        endpoint: loose.endpoint,
+        apiKey: loose.apiKey,
+      }
+      const app = classifyApp(text, fields)
+      const r = emptyResult({
+        name: fields.name,
+        app,
+        endpoint: fields.endpoint,
+        apiKey: fields.apiKey,
+        source: 'json',
+        confidence: scoreFields(fields, app) * 0.95,
+        warnings: buildWarnings(fields),
+      })
+      if (!best || r.confidence > best.confidence) best = r
+    }
+  }
   return best
+}
+
+/**
+ * Regex fallback for provider-like JSON when JSON.parse fails (newapi_channel_conn shares, etc.).
+ * Only fires when quoted JSON field names are present — never steal plain env/mixed shares.
+ * @param {string} text
+ */
+function extractJsonishFields(text) {
+  const result = { endpoint: null, apiKey: null, name: null, hit: false }
+
+  // Must look like JSON-ish (brace + quoted key) before we try loose extraction
+  if (!/\{[\s\S]*["'](?:key|apiKey|api_key|url|baseUrl|base_url|endpoint)["']\s*:/i.test(text)) {
+    return result
+  }
+
+  const urlField = text.match(
+    /["'](?:url|baseUrl|base_url|endpoint|api_base)["']\s*:\s*["'](https?:\/\/[^"']+)["']/i,
+  )
+  if (urlField) {
+    result.endpoint = cleanUrl(urlField[1])
+    result.hit = true
+  }
+
+  const keyField = text.match(
+    /["'](?:key|apiKey|api_key|token|secret|auth_token)["']\s*:\s*["']([^"']{8,})["']/i,
+  )
+  if (keyField) {
+    result.apiKey = maybeDecodeKey(keyField[1])
+    result.hit = true
+  }
+
+  const nameField = text.match(/["'](?:name|title|provider)["']\s*:\s*["']([^"']+)["']/i)
+  if (nameField) result.name = nameField[1]
+
+  // Only recover free-floating https when we already hit a JSON key field
+  // (Discourse may have turned the url value into bare link text "url")
+  if (result.hit && !result.endpoint) {
+    const urls = unique(matchAll(text, URL_RE).map(cleanUrl)).filter((u) => isHttpUrl(u))
+    result.endpoint = pickBestUrl(urls, text)
+  }
+  return result
 }
 
 function extractJsonObjects(text) {
@@ -626,9 +698,13 @@ function extractJsonObjects(text) {
   return results
 }
 
+function isHttpUrl(value) {
+  return typeof value === 'string' && /^https?:\/\//i.test(value.trim())
+}
+
 function pickProviderFields(obj) {
-  const name = firstString(obj, ['name', 'title', 'label', 'provider', 'providerName'])
-  const endpoint = firstString(obj, [
+  const name = firstString(obj, ['name', 'title', 'label', 'provider', 'providerName', '_type', 'type'])
+  let endpoint = firstString(obj, [
     'endpoint',
     'baseUrl',
     'base_url',
@@ -638,6 +714,9 @@ function pickProviderFields(obj) {
     'url',
     'host',
   ])
+  // Discourse may turn JSON "url" value into visible link text "url" — not a real endpoint
+  if (endpoint && !isHttpUrl(endpoint)) endpoint = null
+
   const apiKey = firstString(obj, [
     'apiKey',
     'api_key',
@@ -654,6 +733,7 @@ function pickProviderFields(obj) {
   let key = apiKey
   if (env && typeof env === 'object') {
     ep = ep || firstString(env, ENV_URL_KEYS.map((k) => k).concat(['baseUrl', 'endpoint']))
+    if (ep && !isHttpUrl(ep)) ep = null
     // also case-insensitive scan
     if (!ep) ep = scanObjectForUrl(env)
     if (!key) key = firstString(env, ENV_KEY_KEYS.concat(['apiKey', 'key']))

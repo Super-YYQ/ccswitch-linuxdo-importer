@@ -243,6 +243,35 @@ base url：https://example.com`
     assert.equal(r.apiKey, 'sk-test-only-222222222222222222222222')
     assert.equal(r.endpoint, 'https://example.com')
   })
+
+  it('parses newapi_channel_conn JSON with base64 key field', () => {
+    const text = `{"_type":"newapi_channel_conn","key":"c2stdGVzdC1vbmx5LTExMTExMTExMTExMTExMTExMTExMTExMTEx","url":"https://newapi.example.invalid"}
+链接不能注册 欢迎佬们 帮忙测试`
+    assert.equal(looksLikeConfig(text), true)
+    const r = parseShareText(text)
+    assert.ok(r)
+    assert.equal(r.endpoint, 'https://newapi.example.invalid')
+    assert.equal(r.apiKey, 'sk-test-only-111111111111111111111111')
+    assert.equal(r.source, 'json')
+  })
+
+  it('recovers endpoint when Discourse linkifies JSON url value to bare "url"', () => {
+    const b64 =
+      'c2stdGVzdC1vbmx5LTExMTExMTExMTExMTExMTExMTExMTExMTEx'
+    // selection.toString() often keeps "url" as link text; real href recovered via enrich
+    const selectionText = `{"_type":"newapi_channel_conn","key":"${b64}","url":"url"}
+链接不能注册`
+    const enriched = enrichTextWithAnchorHrefs(selectionText, [
+      { text: 'url', href: 'https://newapi.example.invalid' },
+    ])
+    // must not corrupt JSON key name into url：https...
+    assert.ok(!/"url[：:]https?:\/\//.test(enriched), `corrupted JSON: ${enriched}`)
+    assert.match(enriched, /https:\/\/nocdn-ai\.939593\.xyz/)
+    const r = parseShareText(enriched)
+    assert.ok(r)
+    assert.equal(r.apiKey, 'sk-test-only-111111111111111111111111')
+    assert.equal(r.endpoint, 'https://newapi.example.invalid')
+  })
 })
 
 describe('enrichTextWithAnchorHrefs', () => {
