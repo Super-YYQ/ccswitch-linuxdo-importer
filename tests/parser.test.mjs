@@ -282,15 +282,17 @@ base url`
   })
 
   it('decodes base64 key with CJK watermark 去除文中 injected (linux.do anti-scrape)', () => {
-    // Synthetic: sk- body with CJK watermark mid-token, then base64 of that.
-    const withWatermark = 'sk-rXLMKmHL3fcIUrsgscUl去除文中42b4LcWVSuLG1YJO7VpVLM42nhLF'
+    // Synthetic: insert CJK anti-scrape watermark mid-token, then base64.
+    const clean = SYNTH.skWatermarkBody
+    const mid = Math.floor(clean.length / 2)
+    const withWatermark = clean.slice(0, mid) + '去除文中' + clean.slice(mid)
     const b64 = base64Encode(withWatermark)
     const text = `API Key（Base64，请自行解码）
 ${b64}
 base url：${SYNTH.endpoint}`
     const r = parseShareText(text)
     assert.ok(r)
-    assert.equal(r.apiKey, SYNTH.skWatermarkBody)
+    assert.equal(r.apiKey, clean)
     assert.equal(r.endpoint, SYNTH.endpoint)
   })
 
