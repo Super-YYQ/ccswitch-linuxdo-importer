@@ -309,29 +309,32 @@ export function repairBrokenBase64(text) {
 }
 
 /**
- * Final pass: decode/clean keys, apply prefix hints from share text, clamp confidence.
- * @param {ParseResult|null} result
- * @param {string} [text] - original share text (for "别忘了 sk- 前缀" style hints)
+ * Single exit for apiKey: decode body (b64/hex/watermark) + optional vendor prefix from prose.
+ * Intermediate parsers should pass raw tokens; finalize always runs this once.
+ * @param {string|null|undefined} raw
+ * @param {string} [shareText]
+ * @returns {string|null|undefined}
  */
+function normalizeApiKey(raw, shareText = '') {
+  if (raw == null || raw === '') return raw
+  const decoded = decodeKeyBody(raw)
+  return applyKeyPrefixHints(decoded, shareText)
+}
+
+/** Final pass: normalize keys/endpoints once, clamp confidence. */
 function finalizeResult(result, text = '') {
   if (!result) return null
 
-  const fixKey = (k) => {
-    if (!k) return k
-    const decoded = maybeDecodeKey(normalizeShareText(k))
-    return applyKeyPrefixHints(decoded, text)
-  }
-
   const beforeKey = result.apiKey
-  if (result.apiKey) result.apiKey = fixKey(result.apiKey)
-  if (result.endpoint) {
-    result.endpoint = cleanUrl(normalizeShareText(result.endpoint))
-  }
+  const fixKey = (k) => (k ? normalizeApiKey(k, text) : k)
 
-  if (result.candidates && result.candidates.length) {
+  if (result.apiKey) result.apiKey = fixKey(result.apiKey)
+  if (result.endpoint) result.endpoint = cleanUrl(normalizeShareText(result.endpoint))
+
+  if (result.candidates?.length) {
     result.candidates = result.candidates.map((c) => ({
       endpoint: c.endpoint ? cleanUrl(normalizeShareText(c.endpoint)) : c.endpoint,
-      apiKey: c.apiKey ? fixKey(c.apiKey) : c.apiKey,
+      apiKey: fixKey(c.apiKey),
     }))
     const i = Math.max(0, Math.min(result.candidateIndex || 0, result.candidates.length - 1))
     result.candidateIndex = i
@@ -339,15 +342,9 @@ function finalizeResult(result, text = '') {
     result.endpoint = result.candidates[i].endpoint
   }
 
-  // Soft note when we prepended a missing vendor prefix from prose hints
   if (result.apiKey && beforeKey) {
-    const decodedOnly = maybeDecodeKey(normalizeShareText(beforeKey))
-    if (
-      decodedOnly &&
-      result.apiKey !== decodedOnly &&
-      /^(sk-ant-|sk-|g2a_)/i.test(result.apiKey) &&
-      !/^(sk-ant-|sk-|g2a_)/i.test(decodedOnly)
-    ) {
+    const bodyOnly = decodeKeyBody(beforeKey)
+    if (hasKeyPrefix(result.apiKey) && bodyOnly && !hasKeyPrefix(bodyOnly) && result.apiKey !== bodyOnly) {
       const prefix = (result.apiKey.match(/^(sk-ant-|sk-|g2a_)/i) || [])[1] || 'sk-'
       const note = `已根据文案补上 ${prefix} 前缀`
       if (!result.warnings) result.warnings = []
@@ -361,15 +358,10 @@ function finalizeResult(result, text = '') {
   return result
 }
 
-/**
- * Detect "别忘了 sk- 前缀" / "prefix: sk-ant-" style instructions in share text.
- * @param {string} text
- * @returns {'sk-ant-'|'sk-'|'g2a_'|null}
- */
-export function detectKeyPrefixHint(text) {
+/** @returns {'sk-ant-'|'sk-'|'g2a_'|null} */
+function detectKeyPrefixHint(text) {
   const t = String(text || '')
   if (!t) return null
-  // More specific prefixes first
   if (
     /sk-ant-[\s_-]*前缀|前缀[\s\S]{0,10}sk-ant-|prefix[\s:：=]*sk-ant-|(?:加|补|带|加上|补上)[\s\S]{0,8}sk-ant-/i.test(
       t,
@@ -377,10 +369,7 @@ export function detectKeyPrefixHint(text) {
   ) {
     return 'sk-ant-'
   }
-  if (/g2a_[\s_-]*前缀|前缀[\s\S]{0,10}g2a_|prefix[\s:：=]*g2a_/i.test(t)) {
-    return 'g2a_'
-  }
-  // "别忘了 sk- 前缀哦" / "记得加 sk-" / "prefix sk-"
+  if (/g2a_[\s_-]*前缀|前缀[\s\S]{0,10}g2a_|prefix[\s:：=]*g2a_/i.test(t)) return 'g2a_'
   if (
     /(?:别忘了|记得|需要|请|务必|别漏)[\s\S]{0,20}sk-[\s_-]*前缀|sk-[\s_-]*前缀|前缀[\s\S]{0,10}sk-(?!ant)|prefix[\s:：=]*sk-(?!ant)|(?:加|补|带|加上|补上)[\s\S]{0,6}sk-(?!ant)/i.test(
       t,
@@ -391,13 +380,7 @@ export function detectKeyPrefixHint(text) {
   return null
 }
 
-/**
- * Prepend vendor prefix when share text instructs to, and key body has none.
- * @param {string} key
- * @param {string} text
- * @returns {string}
- */
-export function applyKeyPrefixHints(key, text) {
+function applyKeyPrefixHints(key, text) {
   if (!key) return key
   let k = String(key).trim()
   if (!k) return k
@@ -406,10 +389,8 @@ export function applyKeyPrefixHints(key, text) {
   }
   const prefix = detectKeyPrefixHint(text)
   if (!prefix) return k
-  // only for bare token bodies (not URLs / prose)
   if (k.length < 8 || k.length > 512) return k
-  if (!/^[A-Za-z0-9_+\-./]+$/.test(k)) return k
-  if (/^https?:\/\//i.test(k)) return k
+  if (!/^[A-Za-z0-9_+\-./]+$/.test(k) || /^https?:\/\//i.test(k)) return k
   return prefix + k
 }
 
@@ -1157,7 +1138,7 @@ function buildCandidatePairs(urls, apiKeys, text, labeled) {
   }
 
   const preferredUrl = labeled.endpoint || pickBestUrl(urls, text)
-  const preferredKey = labeled.apiKey ? maybeDecodeKey(labeled.apiKey) : pickBestKey(apiKeys)
+  const preferredKey = labeled.apiKey ? decodeKeyBody(labeled.apiKey) : pickBestKey(apiKeys)
 
   pairs.sort((a, b) => {
     const sa = scorePair(a, preferredUrl, preferredKey, text)
@@ -1204,188 +1185,147 @@ function scorePair(pair, preferredUrl, preferredKey, text) {
   return s
 }
 
+// Shared label matchers (one source of truth for table / colon / glued forms)
+const LABEL_KEY_RE =
+  /^(?:api\s*key|api[_-]?key|key|token|secret|auth[_-]?token|密钥)(?:\b|[（(]|$)/i
+const LABEL_URL_RE =
+  /^(?:url|base\s*url|base[_-]?url|endpoint|api\s*base|api[_-]?base|host|地址|接口|链接)(?:\b|[（(]|$)/i
+const LABEL_NAME_RE = /^(?:name|名称|名字)(?:\b|[（(]|$)/i
+const LABEL_ANY_RE =
+  /^(url|base\s*url|base[_-]?url|endpoint|api\s*base|api[_-]?base|host|地址|接口|链接|key|api\s*key|api[_-]?key|token|secret|auth[_-]?token|密钥|name|名称|名字)/i
+const LABEL_KEY_PREFIX_RE =
+  /^(?:api\s*key|api[_-]?key|key|token|secret|auth[_-]?token|密钥)(?:\s*[（(][^）)]*[）)])?\s*[:：]?\s*/i
+
+function labelKind(label) {
+  const s = String(label || '').toLowerCase().replace(/\s+/g, '')
+  if (/url|base|endpoint|host|地址|接口|链接/.test(s)) return 'url'
+  if (/key|token|secret|auth|密钥/.test(s)) return 'key'
+  if (/name|名称|名字/.test(s)) return 'name'
+  return null
+}
+
+function stripLabeledValue(value) {
+  let v = String(value || '').trim()
+  if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) {
+    v = v.slice(1, -1).trim()
+  }
+  return v.replace(/[，。；、！？]+$/g, '')
+}
+
+function lookLikeKeyValue(v) {
+  return (
+    !!v &&
+    (/^(sk-ant-|sk-|g2a_|Bearer\s)/i.test(v) ||
+      /^[A-Za-z0-9+/_-]{16,}={0,2}$/.test(v) ||
+      v.length >= 12)
+  )
+}
+
+function assignLabeledField(result, kind, value) {
+  if (!kind || value == null || value === '') return
+  if (kind === 'url') {
+    const u = (String(value).match(URL_RE) || [])[0]
+    if (u) result.endpoint = cleanUrl(u)
+    else if (/^https?:\/\//i.test(value)) result.endpoint = cleanUrl(value)
+    else return
+  } else if (kind === 'key') {
+    // raw token — finalizeResult runs normalizeApiKey once
+    result.apiKey = String(value).replace(/\s+/g, '')
+  } else if (kind === 'name') {
+    result.name = String(value).trim()
+  }
+  result.hit = true
+}
+
+function joinBase64Continuations(lines, from, start, hardCap) {
+  let next = start
+  let k = from
+  while (k < hardCap && /^[A-Za-z0-9+/_-]{8,}={0,2}$/.test(lines[k].trim())) {
+    next += lines[k].trim()
+    k++
+  }
+  return next.replace(/\s+/g, '')
+}
+
+function readFollowingKey(lines, afterIdx) {
+  for (let j = afterIdx; j < Math.min(afterIdx + 4, lines.length); j++) {
+    let next = lines[j].trim()
+    if (!next) continue
+    if (LABEL_URL_RE.test(next) || LABEL_KEY_RE.test(next) || LABEL_NAME_RE.test(next)) break
+    next = next.replace(LABEL_KEY_PREFIX_RE, '')
+    next = joinBase64Continuations(lines, j + 1, next, Math.min(afterIdx + 5, lines.length))
+    if (lookLikeKeyValue(next) && !/^https?:\/\//i.test(next)) return next
+  }
+  return null
+}
+
 /**
- * Parse labeled / table-style shares common on linux.do:
- * - "url：https://..." / "key: xxx" (fullwidth colon)
- * - "Base URL    https://..." (table cells / multi-space)
- * - "API Key（Base64，请自行解码）" on one line, value on the next
+ * Labeled / table shares. Stores raw key tokens; normalizeApiKey in finalizeResult.
  */
 function extractLabeledFields(text) {
   const result = { endpoint: null, apiKey: null, name: null, hit: false }
   const lines = text.split(/\r?\n/)
 
-  const isKeyLabel = (s) =>
-    /^(?:api\s*key|api[_-]?key|key|token|secret|auth[_-]?token|密钥)(?:\b|[（(]|$)/i.test(s)
-  const isUrlLabel = (s) =>
-    /^(?:url|base\s*url|base[_-]?url|endpoint|api\s*base|api[_-]?base|host|地址|接口|链接)(?:\b|[（(]|$)/i.test(
-      s,
-    )
-  const isNameLabel = (s) => /^(?:name|名称|名字)(?:\b|[（(]|$)/i.test(s)
-
-  const stripValue = (value) => {
-    let v = String(value || '').trim()
-    if (
-      (v.startsWith('"') && v.endsWith('"')) ||
-      (v.startsWith("'") && v.endsWith("'"))
-    ) {
-      v = v.slice(1, -1).trim()
-    }
-    return v.replace(/[，。；、！？]+$/g, '')
-  }
-
-  const lookLikeKeyValue = (v) =>
-    !!v &&
-    ( /^(sk-ant-|sk-|g2a_|Bearer\s)/i.test(v) ||
-      /^[A-Za-z0-9+/_-]{16,}={0,2}$/.test(v) ||
-      v.length >= 12 )
-
   for (let i = 0; i < lines.length; i++) {
-    const raw = lines[i]
-    const line = raw.trim()
+    const line = lines[i].trim()
     if (!line) continue
 
-    // "API Key（Base64，请自行解码）c2st..." glued value on same line
     const keyGlued = line.match(
-      /^(?:api\s*key|api[_-]?key|key|token|secret|auth[_-]?token|密钥)(?:\s*[（(][^）)]*[）)])?\s*[:：]?\s*([A-Za-z0-9+/_-]{16,}={0,2})\s*$/i,
+      new RegExp(LABEL_KEY_PREFIX_RE.source + '([A-Za-z0-9+/_-]{16,}={0,2})\s*$', 'i'),
     )
     if (keyGlued && !result.apiKey) {
-      result.apiKey = maybeDecodeKey(keyGlued[1])
-      result.hit = true
+      assignLabeledField(result, 'key', keyGlued[1])
       continue
     }
 
-    // "API Key（Base64，请自行解码）" — label only, value on following line(s)
-    // Allow optional trailing notes in fullwidth/halfwidth parens.
-    const keyLabelOnly = line.match(
-      /^(?:api\s*key|api[_-]?key|key|token|secret|auth[_-]?token|密钥)(?:\s*[（(][^）)]*[）)])?\s*[:：]?\s*$/i,
-    )
-    if (keyLabelOnly && !result.apiKey) {
-      for (let j = i + 1; j < Math.min(i + 5, lines.length); j++) {
-        let next = lines[j].trim()
-        if (!next) continue
-        // stop if next line looks like another label
-        if (isUrlLabel(next) || isKeyLabel(next) || isNameLabel(next)) break
-        // strip leftover label prefix if Discourse glued poorly
-        next = next.replace(
-          /^(?:api\s*key|api[_-]?key|key|token|密钥)(?:\s*[（(][^）)]*[）)])?\s*[:：]?\s*/i,
-          '',
-        )
-        // join pure base64 continuation lines
-        let k = j + 1
-        while (
-          k < Math.min(i + 6, lines.length) &&
-          /^[A-Za-z0-9+/_-]{8,}={0,2}$/.test(lines[k].trim())
-        ) {
-          next += lines[k].trim()
-          k++
-        }
-        next = next.replace(/\s+/g, '')
-        if (lookLikeKeyValue(next) && !/^https?:\/\//i.test(next)) {
-          result.apiKey = maybeDecodeKey(next)
-          result.hit = true
-          break
-        }
-      }
+    if (new RegExp(LABEL_KEY_PREFIX_RE.source + '$', 'i').test(line) && !result.apiKey) {
+      const v = readFollowingKey(lines, i + 1)
+      if (v) assignLabeledField(result, 'key', v)
       continue
     }
 
-    // Same-line colon form: Base URL：https://... / key：xxx
-    const colon = line.match(
-      /^(url|base\s*url|base[_-]?url|endpoint|api\s*base|api[_-]?base|host|地址|接口|链接|key|api\s*key|api[_-]?key|token|secret|auth[_-]?token|密钥|name|名称|名字)\s*[:：=]\s*(.+)$/i,
+    const labeled = line.match(
+      new RegExp(LABEL_ANY_RE.source + '\s*(?:[:：=]\s*|\s{2,})(.+)$', 'i'),
     )
-    if (colon) {
-      const label = colon[1].toLowerCase().replace(/\s+/g, '')
-      let value = stripValue(colon[2])
-      // value might still be a note like "（Base64，请自行解码）" with real value next line
-      if (
-        /key|token|secret|auth|密钥/.test(label) &&
-        (!lookLikeKeyValue(value) || /base64|解码|自行/i.test(value))
-      ) {
-        for (let j = i + 1; j < Math.min(i + 5, lines.length); j++) {
-          const next = lines[j].trim()
-          if (!next) continue
-          if (lookLikeKeyValue(next) && !/^https?:\/\//i.test(next)) {
-            value = next
-            break
-          }
-        }
+    if (labeled) {
+      const kind = labelKind(labeled[1])
+      let value = stripLabeledValue(labeled[2])
+      if (kind === 'key' && (!lookLikeKeyValue(value) || /base64|解码|自行/i.test(value))) {
+        value = readFollowingKey(lines, i + 1) || value
       }
-      if (!value) continue
-      result.hit = true
-      if (/url|base|endpoint|host|地址|接口|链接/.test(label)) {
-        const u = (value.match(URL_RE) || [])[0]
-        if (u) result.endpoint = cleanUrl(u)
-        else if (/^https?:\/\//i.test(value)) result.endpoint = cleanUrl(value)
-      } else if (/key|token|secret|auth|密钥/.test(label)) {
-        result.apiKey = maybeDecodeKey(value)
-      } else if (/name|名称|名字/.test(label)) {
-        result.name = value
-      }
-      continue
-    }
-
-    // Table / multi-space: "Base URL    https://api.example.invalid"
-    const table = line.match(
-      /^(url|base\s*url|base[_-]?url|endpoint|api\s*base|api[_-]?base|host|地址|接口|链接|key|api\s*key|api[_-]?key|token|secret|auth[_-]?token|密钥|name|名称|名字)\s{2,}(.+)$/i,
-    )
-    if (table) {
-      const label = table[1].toLowerCase().replace(/\s+/g, '')
-      const value = stripValue(table[2])
-      if (!value) continue
-      result.hit = true
-      if (/url|base|endpoint|host|地址|接口|链接/.test(label)) {
-        const u = (value.match(URL_RE) || [])[0]
-        if (u) result.endpoint = cleanUrl(u)
-        else if (/^https?:\/\//i.test(value)) result.endpoint = cleanUrl(value)
-      } else if (/key|token|secret|auth|密钥/.test(label)) {
-        result.apiKey = maybeDecodeKey(value)
-      } else if (/name|名称|名字/.test(label)) {
-        result.name = value
+      if (value && !(kind === 'key' && /base64|解码|自行/i.test(value) && !lookLikeKeyValue(value))) {
+        assignLabeledField(result, kind, value)
       }
       continue
     }
   }
 
-  // single-line form: url：https://x key：yyy
-  if (!result.endpoint || !result.apiKey) {
-    const inlineUrl = text.match(
+  if (!result.endpoint) {
+    const m = text.match(
       /(?:url|base[_-]?url|base\s*url|endpoint|地址|接口)\s*[:：]\s*(https?:\/\/[^\s，。；]+)/i,
     )
-    if (inlineUrl && !result.endpoint) {
-      result.endpoint = cleanUrl(inlineUrl[1])
-      result.hit = true
-    }
-
-    const inlineKey = text.match(
+    if (m) assignLabeledField(result, 'url', m[1])
+  }
+  if (!result.apiKey) {
+    const m = text.match(
       /(?:key|api[_-]?key|api\s*key|token|密钥)\s*[:：]\s*([A-Za-z0-9_+\-/=]{8,})/i,
     )
-    if (inlineKey && !result.apiKey) {
-      result.apiKey = maybeDecodeKey(inlineKey[1])
-      result.hit = true
-    }
+    if (m) assignLabeledField(result, 'key', m[1])
   }
 
   return result
 }
 
-/**
- * If value is base64/hex that decodes to a printable API token, return decoded; else original.
- * Also strips common linux.do anti-scrape watermarks (CJK like \u300C\u53BB\u9664\u6587\u4E2D\u300D) injected into keys.
- * Does not apply vendor prefix hints \u2014 that is done in finalizeResult via applyKeyPrefixHints.
- */
-function maybeDecodeKey(value) {
+/** Decode b64/hex + strip CJK watermark; no prefix hints. */
+function decodeKeyBody(value) {
   if (!value) return value
-  // remove invisible chars / whitespace that Discourse injects into long keys
   let v = String(value)
     .replace(/[\u200B-\u200D\uFEFF\u00AD\u2060]/g, '')
     .replace(/[\s\u00A0]+/g, '')
     .trim()
-  // already looks like a normal key (may still carry CJK watermark mid-token)
   if (/^(sk-ant-|sk-|g2a_|Bearer\s*)/i.test(v)) {
     return sanitizeApiKey(v.replace(/^Bearer\s*/i, ''))
   }
-
-  // hex-encoded key body or full key (even length, long enough)
   if (/^[0-9a-fA-F]{24,}$/.test(v) && v.length % 2 === 0) {
     try {
       const decoded = sanitizeApiKey(hexDecode(v).trim())
@@ -1393,31 +1333,32 @@ function maybeDecodeKey(value) {
         return decoded
       }
     } catch {
-      /* try base64 next */
+      /* base64 next */
     }
   }
-
-  // base64-ish (charset, often ends with =)
   if (!/^[A-Za-z0-9+/_-]+={0,2}$/.test(v) || v.length < 16) return v
   try {
     const decoded = sanitizeApiKey(base64Decode(v).trim())
-    if (isDecodableKeyBody(decoded)) {
-      // prefer decoded when it looks more like a key than the raw b64
-      if (hasKeyPrefix(decoded) || decoded.includes('_') || decoded.length < v.length) {
-        return decoded
-      }
+    if (
+      isDecodableKeyBody(decoded) &&
+      (hasKeyPrefix(decoded) || decoded.includes('_') || decoded.length < v.length)
+    ) {
+      return decoded
     }
   } catch {
-    /* keep original */
+    /* keep */
   }
   return v
+}
+
+function maybeDecodeKey(value) {
+  return decodeKeyBody(value)
 }
 
 function hasKeyPrefix(s) {
   return /^(sk-ant-|sk-|g2a_)/i.test(s)
 }
 
-/** Printable token-like body after decode (with or without vendor prefix). */
 function isDecodableKeyBody(decoded) {
   return (
     !!decoded &&
@@ -1432,37 +1373,29 @@ function isDecodableKeyBody(decoded) {
 function hexDecode(hex) {
   const h = String(hex).replace(/[^0-9a-fA-F]/g, '')
   if (h.length % 2 !== 0) throw new Error('bad hex')
-  if (typeof Buffer !== 'undefined') {
-    return Buffer.from(h, 'hex').toString('utf8')
-  }
+  if (typeof Buffer !== 'undefined') return Buffer.from(h, 'hex').toString('utf8')
   const bytes = new Uint8Array(h.length / 2)
-  for (let i = 0; i < bytes.length; i++) {
-    bytes[i] = parseInt(h.substr(i * 2, 2), 16)
-  }
-  if (typeof TextDecoder !== 'undefined') {
-    return new TextDecoder('utf-8').decode(bytes)
-  }
+  for (let i = 0; i < bytes.length; i++) bytes[i] = parseInt(h.substr(i * 2, 2), 16)
+  if (typeof TextDecoder !== 'undefined') return new TextDecoder('utf-8').decode(bytes)
   let s = ''
   for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i])
   return s
 }
 
 /**
- * Strip non-ASCII watermarks (e.g. \u300C\u53BB\u9664\u6587\u4E2D\u300D) that linux.do injects into shared keys.
- * Only applied when the result still looks like an API token prefix.
+ * Strip non-ASCII watermarks (e.g. CJK anti-scrape) from API keys.
  * @param {string} key
  * @returns {string}
  */
 function sanitizeApiKey(key) {
   if (!key) return key
-  let k = String(key).replace(/[\u200B-\u200D\uFEFF\u00AD\u2060]/g, '').trim()
-  // Fast path: already pure ASCII token
+  let k = String(key)
+    .replace(/[\u200B-\u200D\uFEFF\u00AD\u2060]/g, '')
+    .trim()
   if (/^[\x20-\x7E]+$/.test(k) && !/\s/.test(k)) {
     return k.replace(/\s+/g, '')
   }
-  // Drop non-ASCII (CJK watermarks etc.) and whitespace
   const stripped = k.replace(/[^\x20-\x7E]/g, '').replace(/\s+/g, '')
-  // Only accept if it still looks like a known API key form after stripping
   if (
     stripped.length >= 8 &&
     stripped.length <= 512 &&
@@ -1470,7 +1403,6 @@ function sanitizeApiKey(key) {
   ) {
     return stripped
   }
-  // Unknown shape with non-ASCII: keep original (don't invent a key)
   return k
 }
 

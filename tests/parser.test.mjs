@@ -9,8 +9,6 @@ import {
   base64Encode,
   enrichTextWithAnchorHrefs,
   selectCandidate,
-  detectKeyPrefixHint,
-  applyKeyPrefixHints,
 } from '../userscript/lib/core.mjs'
 
 describe('looksLikeConfig', () => {
@@ -395,22 +393,6 @@ describe('selectCandidate', () => {
 })
 
 describe('key prefix hints + alternate encodings', () => {
-  it('detects 别忘了 sk- 前缀 style hints', () => {
-    assert.equal(detectKeyPrefixHint('别忘了 sk- 前缀哦'), 'sk-')
-    assert.equal(detectKeyPrefixHint('记得加 sk-ant- 前缀'), 'sk-ant-')
-    assert.equal(detectKeyPrefixHint('prefix: sk-'), 'sk-')
-    assert.equal(detectKeyPrefixHint('普通分享没有前缀说明'), null)
-  })
-
-  it('applyKeyPrefixHints only when bare body + hint', () => {
-    assert.equal(applyKeyPrefixHints('AbCdEfGhIjKlMnOpQrSt', '别忘了 sk- 前缀'), 'sk-AbCdEfGhIjKlMnOpQrSt')
-    assert.equal(
-      applyKeyPrefixHints('sk-already-prefixed-value', '别忘了 sk- 前缀'),
-      'sk-already-prefixed-value',
-    )
-    assert.equal(applyKeyPrefixHints('AbCdEfGhIjKlMnOpQrSt', '没有提示'), 'AbCdEfGhIjKlMnOpQrSt')
-  })
-
   it('parses base64 key body and prepends sk- from prose hint (linux.do style)', () => {
     // synthetic body — not a real secret
     const body = 'JFkov3xTVxHRhYOGBBuD61tsSYK0Gcf1cZgqlQ3VSHXReuwk'
@@ -436,6 +418,15 @@ ${b64}
     const r = parseShareText(text)
     assert.ok(r)
     assert.equal(r.apiKey, `sk-ant-${body}`)
+  })
+
+  it('does not invent sk- prefix without a prose hint', () => {
+    const body = 'BareBodyNoPrefixHint1234567890abcd'
+    const b64 = base64Encode(body)
+    const text = `key（base64）：${b64}\n仅分享 body，无前缀说明`
+    const r = parseShareText(text)
+    assert.ok(r)
+    assert.equal(r.apiKey, body)
   })
 
   it('decodes hex-encoded sk- key when labeled as key', () => {
