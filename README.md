@@ -40,7 +40,7 @@
    - 或复制 [`userscript/ccswitch-linuxdo-importer.user.js`](./userscript/ccswitch-linuxdo-importer.user.js) 全文到「添加新脚本」
 4. 访问 https://linux.do ，在帖子中选中一段配置文字
 
-确认安装版本：打开确认卡后，元信息末尾应显示 **v1.0.4**。
+确认安装版本：打开确认卡后，元信息末尾应显示 **v1.0.5**。
 
 ---
 
@@ -136,6 +136,7 @@ npm run build
 
 ## 变更摘要
 
+- **v1.0.5** — 识别无连字符的 `Grok4.5` / `grok4.5` 等 informal 模型写法
 - **v1.0.4** — Base64 Key 解码后自动剥离 linux.do「去除文中」等 CJK 水印
 - **v1.0.3** — 选区中的链接若可见文案是 `base url` / `url`（真实地址只在 `href`），自动合并 `href` 后再解析
 - **v1.0.2** — 模型自动识别并写入深链；README 重排；作者信息匿名化

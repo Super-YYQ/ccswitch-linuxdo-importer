@@ -368,7 +368,7 @@
       `识别：${result.source} · 置信度 ${conf}%` +
       (result.candidateCount > 1 ? ` · 候选×${result.candidateCount}` : '') +
       (modelCount ? ` · 模型×${modelCount}` : '') +
-      ' · v1.0.4'
+      ' · v1.0.5'
 
     const modelLine = currentModelInfo?.model
       ? escapeHtml(currentModelInfo.model) +

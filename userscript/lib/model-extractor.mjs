@@ -43,10 +43,12 @@ const MODEL_PATTERNS = {
     /o3(?:-mini)?/gi,
     /o1(?:-mini|-preview)?/gi,
   ],
-  // Grok
+  // Grok — accept "Grok4.5" / "grok4.5" (no hyphen) common on linux.do titles
   grok: [
-    /grok-4\.5/gi,
-    /grok-3\.5/gi,
+    /grok[-_]?4\.5/gi,
+    /grok[-_]?3\.5/gi,
+    /grok[-_]?4(?!\.\d)/gi,
+    /grok[-_]?3(?!\.\d)/gi,
     /grok-beta/gi,
     /\bgrok-2\b/gi,
   ],
@@ -82,7 +84,7 @@ export function extractModels(text) {
     for (const re of patterns) {
       const matches = text.matchAll(new RegExp(re.source, re.flags))
       for (const m of matches) {
-        found.add(m[0].toLowerCase())
+        found.add(normalizeModelId(m[0]))
       }
     }
   }
@@ -108,6 +110,19 @@ export function extractModels(text) {
   const model = sonnetModel || opusModel || haikuModel || models[0] || null
 
   return { model, haikuModel, sonnetModel, opusModel, models }
+}
+
+/**
+ * Normalize informal spellings to stable model ids.
+ * e.g. Grok4.5 / grok4.5 → grok-4.5; gpt5.5 → gpt-5.5 (when matched that way)
+ * @param {string} raw
+ * @returns {string}
+ */
+function normalizeModelId(raw) {
+  let m = String(raw || '').toLowerCase().trim()
+  // Grok: "Grok4.5" / "grok4.5" / "grok_4.5" → "grok-4.5"
+  m = m.replace(/^grok[_-]?(\d)/, 'grok-$1')
+  return m
 }
 
 /**

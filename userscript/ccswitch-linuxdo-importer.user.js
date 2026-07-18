@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         CC Switch Importer for linux.do
 // @namespace    https://github.com/Super-YYQ/ccswitch-linuxdo-importer
-// @version      1.0.4
+// @version      1.0.5
 // @description  选中 linux.do 分享文本，一键导入 CC Switch（Claude Code / Codex，自动识别模型）
 // @author       CC Switch Importer Contributors
 // @match        https://linux.do/*
@@ -1296,10 +1296,12 @@ const MODEL_PATTERNS = {
     /o3(?:-mini)?/gi,
     /o1(?:-mini|-preview)?/gi,
   ],
-  // Grok
+  // Grok — accept "Grok4.5" / "grok4.5" (no hyphen) common on linux.do titles
   grok: [
-    /grok-4\.5/gi,
-    /grok-3\.5/gi,
+    /grok[-_]?4\.5/gi,
+    /grok[-_]?3\.5/gi,
+    /grok[-_]?4(?!\.\d)/gi,
+    /grok[-_]?3(?!\.\d)/gi,
     /grok-beta/gi,
     /\bgrok-2\b/gi,
   ],
@@ -1335,7 +1337,7 @@ function extractModels(text) {
     for (const re of patterns) {
       const matches = text.matchAll(new RegExp(re.source, re.flags))
       for (const m of matches) {
-        found.add(m[0].toLowerCase())
+        found.add(normalizeModelId(m[0]))
       }
     }
   }
@@ -1361,6 +1363,19 @@ function extractModels(text) {
   const model = sonnetModel || opusModel || haikuModel || models[0] || null
 
   return { model, haikuModel, sonnetModel, opusModel, models }
+}
+
+/**
+ * Normalize informal spellings to stable model ids.
+ * e.g. Grok4.5 / grok4.5 → grok-4.5; gpt5.5 → gpt-5.5 (when matched that way)
+ * @param {string} raw
+ * @returns {string}
+ */
+function normalizeModelId(raw) {
+  let m = String(raw || '').toLowerCase().trim()
+  // Grok: "Grok4.5" / "grok4.5" / "grok_4.5" → "grok-4.5"
+  m = m.replace(/^grok[_-]?(\d)/, 'grok-$1')
+  return m
 }
 
 /**
@@ -1759,7 +1774,7 @@ function filterModelsForApp(models, app) {
       `识别：${result.source} · 置信度 ${conf}%` +
       (result.candidateCount > 1 ? ` · 候选×${result.candidateCount}` : '') +
       (modelCount ? ` · 模型×${modelCount}` : '') +
-      ' · v1.0.4'
+      ' · v1.0.5'
 
     const modelLine = currentModelInfo?.model
       ? escapeHtml(currentModelInfo.model) +

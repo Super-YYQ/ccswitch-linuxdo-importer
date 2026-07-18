@@ -27,6 +27,25 @@ describe('extractModels', () => {
     assert.ok(result.models.some(m => /grok/.test(m)))
   })
 
+  it('extracts informal Grok4.5 spelling (no hyphen, mixed case)', () => {
+    // linux.do titles often use "Grok4.5" / "grok4.5" without hyphen
+    for (const text of [
+      '第一波】福利Grok4.5 1000刀',
+      '转发到grok4.5',
+      '模型 grok-4.5',
+      '支持 Grok-4',
+    ]) {
+      const result = extractModels(text)
+      assert.ok(
+        result.models.some((m) => /grok/i.test(m)),
+        `expected grok model in: ${text}`,
+      )
+    }
+    // normalize informal form to hyphenated id when possible
+    const r = extractModels('福利Grok4.5 1000刀')
+    assert.equal(r.model, 'grok-4.5')
+  })
+
   it('handles "支持所有模型" gracefully', () => {
     const text = `支持所有模型，无限制`
     const result = extractModels(text)
