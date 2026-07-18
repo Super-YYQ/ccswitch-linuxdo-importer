@@ -30,7 +30,7 @@ const MODEL_PATTERNS = {
     /\bclaude-haiku\b/gi,
     /\bclaude-opus\b/gi,
   ],
-  // OpenAI / Codex models
+  // OpenAI / Codex models — require word boundaries so base64 blobs don't yield fake "o3"
   openai: [
     /gpt-5\.?6-sol/gi,
     /gpt-5\.?5/gi,
@@ -40,8 +40,8 @@ const MODEL_PATTERNS = {
     /gpt-4-vision(?:-preview)?/gi,
     /gpt-4(?:-\d{4})?/gi,
     /gpt-3\.5-turbo(?:-\d{4})?/gi,
-    /o3(?:-mini)?/gi,
-    /o1(?:-mini|-preview)?/gi,
+    /\bo3(?:-mini)?\b/gi,
+    /\bo1(?:-mini|-preview)?\b/gi,
   ],
   // Grok — accept "Grok4.5" / "grok4.5" (no hyphen) common on linux.do titles.
   // Boundaries avoid false hits like mygrok4.5x / grok4.50
@@ -78,12 +78,18 @@ export function extractModels(text) {
     return { model: null, haikuModel: null, sonnetModel: null, opusModel: null, models: [] }
   }
 
+  // Mask secrets / long base64 so tokens like "...o3..." inside keys never become models
+  const scanText = String(text)
+    .replace(/[A-Za-z0-9+/_-]{24,}={0,2}/g, ' ')
+    .replace(/\bsk-(?:ant-)?[A-Za-z0-9_-]{8,}\b/gi, ' ')
+    .replace(/\bg2a_[A-Za-z0-9_-]{8,}\b/gi, ' ')
+
   const found = new Set()
 
   // Scan all patterns
   for (const patterns of Object.values(MODEL_PATTERNS)) {
     for (const re of patterns) {
-      const matches = text.matchAll(new RegExp(re.source, re.flags))
+      const matches = scanText.matchAll(new RegExp(re.source, re.flags))
       for (const m of matches) {
         found.add(normalizeModelId(m[0]))
       }

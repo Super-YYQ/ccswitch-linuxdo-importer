@@ -272,6 +272,23 @@ base url：https://example.com`
     assert.equal(r.apiKey, 'sk-test-only-111111111111111111111111')
     assert.equal(r.endpoint, 'https://newapi.example.invalid')
   })
+
+  it('handles Discourse-wrapped newapi JSON (newline after colon, unquoted url)', () => {
+    // Reproduces Snipaste_2026-07-18_11-40-20: mixed path, 0 keys, trailing " on endpoint
+    const b64 =
+      'c2stdGVzdC1vbmx5LTExMTExMTExMTExMTExMTExMTExMTExMTEx'
+    const text = `{"_type":"newapi_channel_conn","key":
+"${b64}","url":
+https://newapi.example.invalid"}
+链接不能注册 欢迎佬们 帮忙测试
+
+key base64`
+    const r = parseShareText(text)
+    assert.ok(r)
+    assert.equal(r.endpoint, 'https://newapi.example.invalid')
+    assert.equal(r.apiKey, 'sk-test-only-111111111111111111111111')
+    assert.ok(!String(r.endpoint).includes('"'))
+  })
 })
 
 describe('enrichTextWithAnchorHrefs', () => {

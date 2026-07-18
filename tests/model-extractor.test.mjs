@@ -51,6 +51,23 @@ describe('extractModels', () => {
     assert.equal(extractModels('grok4.50 typo version').models.length, 0)
   })
 
+  it('does not treat o3/o1 substrings inside base64 API keys as models', () => {
+    const b64 =
+      'c2stdGVzdC1vbmx5LTExMTExMTExMTExMTExMTExMTExMTExMTEx'
+    // contains letters that would match /o3/ without boundaries
+    const r = extractModels(
+      `{"_type":"newapi_channel_conn","key":"${b64}","url":"https://newapi.example.invalid"}`,
+    )
+    assert.equal(r.models.length, 0)
+    assert.equal(r.model, null)
+  })
+
+  it('still extracts real o3 / o1 model names with word boundaries', () => {
+    const r = extractModels('支持 o3 与 o1-mini 模型')
+    assert.ok(r.models.some((m) => m === 'o3'))
+    assert.ok(r.models.some((m) => /o1/.test(m)))
+  })
+
   it('handles "支持所有模型" gracefully', () => {
     const text = `支持所有模型，无限制`
     const result = extractModels(text)

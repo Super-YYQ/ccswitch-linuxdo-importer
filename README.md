@@ -40,7 +40,7 @@
    - 或复制 [`userscript/ccswitch-linuxdo-importer.user.js`](./userscript/ccswitch-linuxdo-importer.user.js) 全文到「添加新脚本」
 4. 访问 https://linux.do ，在帖子中选中一段配置文字
 
-确认安装版本：打开确认卡后，元信息末尾应显示 **v1.0.7**。
+确认安装版本：打开确认卡后，元信息末尾应显示 **v1.0.8**。
 
 ---
 
@@ -136,6 +136,7 @@ npm run build
 
 ## 变更摘要
 
+- **v1.0.8** — Discourse 折行/链化 newapi JSON 时合并多解析器结果恢复 Key；endpoint 去尾部引号；屏蔽 base64 内假 `o3` 模型
 - **v1.0.7** — 修复 Discourse 把 JSON `"url"` 链化后 enrich 改坏对象导致丢字段；支持 `newapi_channel_conn` 等 `{key,url}` JSON 分享
 - **v1.0.6** — Windows 友好测试脚本；confidence 封顶；收紧 base64 误报；构建注入版本与 `@updateURL`；Grok 匹配加词边界
 - **v1.0.5** — 识别无连字符的 `Grok4.5` / `grok4.5` 等 informal 模型写法

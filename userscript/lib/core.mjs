@@ -77,24 +77,53 @@ export function parseShareText(text) {
     }
   }
 
-  // 2. Base64 block → decode → re-parse content (without infinite loop: decode once)
+  // 2–6. Prefer complete (endpoint+key) results; otherwise stitch partial hits.
+  // Partial JSON from Discourse linkify must not block mixed/base64 key recovery.
   const b64 = tryParseBase64(cleaned)
-  if (b64) return finalizeResult(b64)
-
-  // 3. JSON object
   const json = tryParseJson(cleaned)
-  if (json) return finalizeResult(json)
-
-  // 4. TOML / key = "value"
   const toml = tryParseTomlLike(cleaned)
-  if (toml) return finalizeResult(toml)
-
-  // 5. Env vars
   const env = tryParseEnv(cleaned)
-  if (env) return finalizeResult(env)
+  const mixed = tryParseMixed(cleaned)
+  return finalizeResult(mergeParseResults([b64, json, toml, env, mixed]))
+}
 
-  // 6. Mixed noise extraction
-  return finalizeResult(tryParseMixed(cleaned))
+/**
+ * Prefer a result that has both endpoint+key; otherwise stitch the best fields together.
+ * @param {Array<ParseResult|null|undefined>} candidates
+ * @returns {ParseResult|null}
+ */
+function mergeParseResults(candidates) {
+  const list = candidates.filter(Boolean)
+  if (list.length === 0) return null
+
+  const complete = list
+    .filter((r) => r.endpoint && r.apiKey)
+    .sort((a, b) => (b.confidence || 0) - (a.confidence || 0))
+  if (complete[0]) return complete[0]
+
+  let best = { ...list[0] }
+  for (const r of list) {
+    if (!best.endpoint && r.endpoint) best.endpoint = r.endpoint
+    if (!best.apiKey && r.apiKey) best.apiKey = r.apiKey
+    if (
+      (!best.name || String(best.name).startsWith('linuxdo-')) &&
+      r.name &&
+      !String(r.name).startsWith('linuxdo-')
+    ) {
+      best.name = r.name
+    }
+    if ((r.confidence || 0) > (best.confidence || 0)) {
+      best.source = r.source
+      best.confidence = r.confidence
+      best.warnings = r.warnings || best.warnings
+      best.candidateCount = r.candidateCount || best.candidateCount
+      best.app = r.app != null ? r.app : best.app
+    }
+  }
+  if (!best.app) best.app = classifyApp('', best)
+  best.warnings = buildWarnings(best)
+  best.confidence = scoreFields(best, best.app)
+  return best.endpoint || best.apiKey ? best : null
 }
 
 /**
@@ -107,6 +136,9 @@ export function normalizeShareText(text) {
     .replace(/[\u200B-\u200D\uFEFF\u00AD\u2060]/g, '')
     // nbsp / narrow nbsp / figure space
     .replace(/[\u00A0\u202F\u2007]/g, ' ')
+    // smart / curly quotes \u2192 ASCII (Discourse / paste noise)
+    .replace(/[\u201C\u201D\u201E\u201F\u2033\u2036]/g, '"')
+    .replace(/[\u2018\u2019\u201A\u201B\u2032\u2035]/g, "'")
     .replace(/\r\n?/g, '\n')
     .trim()
 }
@@ -623,6 +655,7 @@ function tryParseJson(text) {
 /**
  * Regex fallback for provider-like JSON when JSON.parse fails (newapi_channel_conn shares, etc.).
  * Only fires when quoted JSON field names are present — never steal plain env/mixed shares.
+ * Tolerates newlines after `:` and unquoted http(s) url values (Discourse linkify).
  * @param {string} text
  */
 function extractJsonishFields(text) {
@@ -633,23 +666,25 @@ function extractJsonishFields(text) {
     return result
   }
 
+  // "url": "https://..." OR "url":\nhttps://... (unquoted after Discourse linkify)
   const urlField = text.match(
-    /["'](?:url|baseUrl|base_url|endpoint|api_base)["']\s*:\s*["'](https?:\/\/[^"']+)["']/i,
+    /["'](?:url|baseUrl|base_url|endpoint|api_base)["']\s*:\s*(?:["'](https?:\/\/[^"']+)["']|(https?:\/\/[^\s"'`<>，。；、}\]]+))/i,
   )
   if (urlField) {
-    result.endpoint = cleanUrl(urlField[1])
+    result.endpoint = cleanUrl(urlField[1] || urlField[2])
     result.hit = true
   }
 
+  // "key": "c2st..." allowing newline between colon and value
   const keyField = text.match(
-    /["'](?:key|apiKey|api_key|token|secret|auth_token)["']\s*:\s*["']([^"']{8,})["']/i,
+    /["'](?:key|apiKey|api_key|token|secret|auth_token)["']\s*:\s*["']?\s*([A-Za-z0-9+/_-]{16,}={0,2})["']?/i,
   )
   if (keyField) {
     result.apiKey = maybeDecodeKey(keyField[1])
     result.hit = true
   }
 
-  const nameField = text.match(/["'](?:name|title|provider)["']\s*:\s*["']([^"']+)["']/i)
+  const nameField = text.match(/["'](?:name|title|provider|_type|type)["']\s*:\s*["']([^"']+)["']/i)
   if (nameField) result.name = nameField[1]
 
   // Only recover free-floating https when we already hit a JSON key field
@@ -1274,7 +1309,11 @@ function pickBestKey(keys) {
 }
 
 function cleanUrl(u) {
-  return u.replace(/[.,;:!?）)」』】]+$/g, '')
+  return String(u || '')
+    .trim()
+    // trailing JSON / prose punctuation (Discourse selection often keeps the closing quote)
+    .replace(/[.,;:!?）)」』】"'`]+$/g, '')
+    .replace(/^["'`]+/, '')
 }
 
 function scoreFields(fields, app) {
