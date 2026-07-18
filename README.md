@@ -40,7 +40,7 @@
    - 或复制 [`userscript/ccswitch-linuxdo-importer.user.js`](./userscript/ccswitch-linuxdo-importer.user.js) 全文到「添加新脚本」
 4. 访问 https://linux.do ，在帖子中选中一段配置文字
 
-确认安装版本：打开确认卡后，元信息末尾应显示 **v1.0.8**。
+确认安装版本：打开确认卡后，元信息末尾应显示 **v1.1.0**。
 
 ---
 
@@ -50,10 +50,12 @@
 2. 点击蓝色悬浮按钮 **「导入 ccSwitch」**
 3. 在确认卡检查：
    - `endpoint` / 脱敏 `apiKey`
-   - `model`（若文案中有模型名）
+   - `model`（多模型时可下拉切换；会按 Claude/Codex 过滤）
+   - 多组 URL/Key 时可用 ‹ › 切换候选
    - Claude Code / Codex 目标栏
 4. 点 **「打开导入」** 唤起 CC Switch  
-   若无反应：深链已复制，可粘贴到地址栏，或检查 CC Switch 是否已注册协议
+   若无反应：点 **「复制深链」** 粘贴到地址栏，或检查 CC Switch 是否已注册协议  
+   （打开时**不会**自动把含 Key 的深链写入剪贴板）
 5. 也可点 **「复制深链」** 手动处理
 
 ### 模型自动配置规则
@@ -110,6 +112,9 @@ npm test
 
 # 从 lib + UI 重新打包油猴单文件
 npm run build
+
+# 测试 + 构建 + 校验提交的 .user.js 与构建产物一致（CI 同逻辑）
+npm run check
 ```
 
 | 路径 | 说明 |
@@ -136,6 +141,7 @@ npm run build
 
 ## 变更摘要
 
+- **v1.1.0** — 稳定 app 分类（模型列表不再误判）；多 URL/Key 候选可切换；确认卡模型下拉并按 app 过滤；打开导入不再自动复制含 Key 深链；CI + `npm run check`
 - **v1.0.8** — Discourse 折行/链化 newapi JSON 时合并多解析器结果恢复 Key；endpoint 去尾部引号；屏蔽 base64 内假 `o3` 模型
 - **v1.0.7** — 修复 Discourse 把 JSON `"url"` 链化后 enrich 改坏对象导致丢字段；支持 `newapi_channel_conn` 等 `{key,url}` JSON 分享
 - **v1.0.6** — Windows 友好测试脚本；confidence 封顶；收紧 base64 误报；构建注入版本与 `@updateURL`；Grok 匹配加词边界

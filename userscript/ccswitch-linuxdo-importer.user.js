@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         CC Switch Importer for linux.do
 // @namespace    https://github.com/Super-YYQ/ccswitch-linuxdo-importer
-// @version      1.0.8
+// @version      1.1.0
 // @description  选中 linux.do 分享文本，一键导入 CC Switch（Claude Code / Codex，自动识别模型）
 // @author       CC Switch Importer Contributors
 // @match        https://linux.do/*
@@ -23,7 +23,7 @@
 ;(function (global) {
   'use strict';
 
-  const SCRIPT_VERSION = "1.0.8";
+  const SCRIPT_VERSION = "1.1.0";
 
   // ─── core (parse / classify / deeplink) ───
 /**
@@ -68,6 +68,7 @@ const DEEPLINK_RE = /ccswitch:\/\/[^\s"'`<>]+/i
 /**
  * @typedef {'claude'|'codex'|null} AppKind
  * @typedef {'deeplink'|'base64'|'json'|'env'|'toml'|'mixed'} SourceKind
+ * @typedef {{ endpoint: string|null, apiKey: string|null }} CandidatePair
  * @typedef {{
  *   name: string,
  *   app: AppKind,
@@ -78,6 +79,8 @@ const DEEPLINK_RE = /ccswitch:\/\/[^\s"'`<>]+/i
  *   source: SourceKind,
  *   confidence: number,
  *   candidateCount: number,
+ *   candidateIndex: number,
+ *   candidates: CandidatePair[],
  *   warnings: string[],
  *   deeplink?: string|null,
  *   models?: string[]
@@ -140,11 +143,16 @@ function mergeParseResults(candidates) {
     ) {
       best.name = r.name
     }
+    if ((r.candidates?.length || 0) > (best.candidates?.length || 0)) {
+      best.candidates = r.candidates
+      best.candidateIndex = r.candidateIndex || 0
+      best.candidateCount = r.candidates.length
+    }
     if ((r.confidence || 0) > (best.confidence || 0)) {
       best.source = r.source
       best.confidence = r.confidence
       best.warnings = r.warnings || best.warnings
-      best.candidateCount = r.candidateCount || best.candidateCount
+      best.candidateCount = Math.max(best.candidateCount || 1, r.candidateCount || 1)
       best.app = r.app != null ? r.app : best.app
     }
   }
@@ -451,48 +459,87 @@ function maskKey(key) {
 }
 
 /**
+ * Classify target app from strong provider signals only.
+ * Model lists (gpt/claude/grok mixed on relay shares) are stripped so they
+ * do not push codex/claude; ambiguous → null (user picks).
+ *
  * @param {string} text
  * @param {object} fields
  * @returns {AppKind}
  */
 function classifyApp(text, fields = {}) {
-  const blob = [
-    text || '',
-    fields.endpoint || '',
-    fields.apiKey || '',
-    fields.name || '',
-    fields.config || '',
-  ]
-    .join('\n')
-    .toLowerCase()
+  const key = String(fields.apiKey || '').toLowerCase()
+  const endpoint = String(fields.endpoint || '').toLowerCase()
+  const name = String(fields.name || '').toLowerCase()
+  const config = String(fields.config || '').toLowerCase()
+  // Free text without model-id noise (relay posts list many models)
+  const prose = stripModelTokens(String(text || '').toLowerCase())
+  const blob = [prose, endpoint, key, name, config].join('\n')
 
   let claude = 0
   let codex = 0
 
-  if (/sk-ant-/.test(blob)) claude += 3
+  if (/sk-ant-/.test(key) || /sk-ant-/.test(blob)) claude += 3
   if (/anthropic/.test(blob)) claude += 2
-  if (/an?thropic_/.test(blob)) claude += 2
-  // bare "claude" in model lists is weak (e.g. "claude系列均会转发")
-  if (/\bclaude\b/.test(blob)) claude += 0.5
+  if (/anthropic_|claude_base|claude_api/.test(blob)) claude += 2
 
   if (/openai/.test(blob)) codex += 2
-  if (/codex/.test(blob)) codex += 3
-  if (/openai_api_key|openai_base/.test(blob)) codex += 2
-  if (/api\.openai\.com/.test(blob)) codex += 2
-  if (/\bgpt-?\d/.test(blob)) codex += 0.5
+  if (/\bcodex\b/.test(blob)) codex += 3
+  if (/openai_api_key|openai_base|codex_api|codex_base/.test(blob)) codex += 2
+  if (/api\.openai\.com/.test(endpoint) || /api\.openai\.com/.test(blob)) codex += 2
 
-  // generic sk- without ant leans slightly openai/codex, but weak
-  if (/sk-(?!ant)[a-z0-9]/.test(blob) && claude < 2) codex += 0.5
-
-  // multi-model relay blurbs mentioning both → leave to user
-  const mentionsBothModels =
-    /\bgpt-?\d/.test(blob) && /\bclaude\b/.test(blob) && !/sk-ant-/.test(blob)
-  if (mentionsBothModels && Math.abs(claude - codex) < 1.5) return null
+  // Bare sk- is too common on multi-protocol relays — only nudge codex when
+  // endpoint/name already looks OpenAI-ish.
+  if (/^sk-(?!ant)/i.test(key) && claude < 2) {
+    if (/openai|codex/.test(endpoint) || /openai|codex/.test(name)) codex += 0.5
+  }
 
   if (claude === 0 && codex === 0) return null
-  if (claude > codex) return 'claude'
-  if (codex > claude) return 'codex'
+  // Require a clear margin; ties and near-ties → user picks
+  if (claude >= codex + 0.5) return 'claude'
+  if (codex >= claude + 0.5) return 'codex'
   return null
+}
+
+/**
+ * Remove model id tokens so "gpt-5.5，claude系列，grok4.5" does not classify app.
+ * @param {string} s
+ */
+function stripModelTokens(s) {
+  return String(s || '')
+    .replace(/claude[-_.\s]?\w[\w.-]*/gi, ' ')
+    .replace(/gpt[-_.\s]?\w[\w.-]*/gi, ' ')
+    .replace(/grok[-_.\s]?\w[\w.-]*/gi, ' ')
+    .replace(/gemini[-_.\s]?\w[\w.-]*/gi, ' ')
+    .replace(/deepseek[-_.\s]?\w[\w.-]*/gi, ' ')
+    .replace(/\bo[13](?:-mini|-preview)?\b/gi, ' ')
+}
+
+/**
+ * Switch result to another endpoint/apiKey candidate pair (from mixed multi-match).
+ * @param {ParseResult} result
+ * @param {number} index
+ * @returns {ParseResult}
+ */
+function selectCandidate(result, index) {
+  if (!result) return result
+  const list = result.candidates
+  if (!list || list.length === 0) return result
+  const i = Math.max(0, Math.min(Number(index) || 0, list.length - 1))
+  const pair = list[i]
+  const next = {
+    ...result,
+    endpoint: pair.endpoint,
+    apiKey: pair.apiKey,
+    candidateIndex: i,
+    candidateCount: list.length,
+  }
+  next.warnings = buildWarnings(next)
+  next.confidence = scoreFields(next, next.app)
+  if (typeof next.confidence === 'number') {
+    next.confidence = Math.min(1, Math.max(0, next.confidence))
+  }
+  return next
 }
 
 // ─── internals ───────────────────────────────────────────────
@@ -521,6 +568,8 @@ function emptyResult(partial) {
     source: 'mixed',
     confidence: 0,
     candidateCount: 1,
+    candidateIndex: 0,
+    candidates: [],
     warnings: [],
     deeplink: null,
     ...partial,
@@ -975,7 +1024,7 @@ function tryParseMixed(text) {
   const urls = unique([
     ...matchAll(text, URL_RE).map(cleanUrl),
     ...(labeled.endpoint ? [labeled.endpoint] : []),
-  ])
+  ]).filter((u) => isHttpUrl(u))
 
   const keys = unique([
     ...matchAll(text, SK_ANT_RE),
@@ -984,24 +1033,27 @@ function tryParseMixed(text) {
     ...extractLooseKeys(text),
     ...extractBase64DecodedKeys(text),
     ...(labeled.apiKey ? [labeled.apiKey] : []),
-  ])
+  ]).map((k) => maybeDecodeKey(k))
 
   const apiKeys = unique(keys)
 
   if (urls.length === 0 && apiKeys.length === 0) return null
 
-  let endpoint = labeled.endpoint || pickBestUrl(urls, text)
-  let apiKey = labeled.apiKey || pickBestKey(apiKeys)
+  const candidates = buildCandidatePairs(urls, apiKeys, text, labeled)
+  if (candidates.length === 0) return null
 
-  // Prefer decoded form when labeled key was base64
-  if (apiKey) apiKey = maybeDecodeKey(apiKey)
+  const best = candidates[0]
+  let endpoint = best.endpoint
+  let apiKey = best.apiKey
 
   const fields = { name: labeled.name || defaultName(), endpoint, apiKey }
   const app = classifyApp(text, fields)
-  const candidateCount = Math.max(urls.length, 1) * Math.max(apiKeys.length, 1)
+  const candidateCount = candidates.length
   const warnings = buildWarnings(fields)
   if (candidateCount > 1) {
-    warnings.push(`检测到 ${urls.length} 个 URL、${apiKeys.length} 个 key，已选取置信度最高的一对`)
+    warnings.push(
+      `检测到 ${urls.length} 个 URL、${apiKeys.length} 个 key，共 ${candidateCount} 组候选（可在确认卡切换）`,
+    )
   }
 
   const confidence = scoreFields(fields, app) * (candidateCount > 1 ? 0.9 : 1)
@@ -1012,11 +1064,82 @@ function tryParseMixed(text) {
     app,
     endpoint,
     apiKey,
-    source: labeled.hit ? 'mixed' : 'mixed',
+    source: 'mixed',
     confidence: labeled.hit ? Math.min(1, confidence + 0.1) : confidence,
     candidateCount,
+    candidateIndex: 0,
+    candidates,
     warnings,
   })
+}
+
+/**
+ * Rank endpoint×key pairs for mixed shares. Labeled fields pin when present.
+ * @param {string[]} urls
+ * @param {string[]} apiKeys
+ * @param {string} text
+ * @param {{ endpoint?: string|null, apiKey?: string|null }} labeled
+ * @returns {CandidatePair[]}
+ */
+function buildCandidatePairs(urls, apiKeys, text, labeled) {
+  /** @type {CandidatePair[]} */
+  const pairs = []
+  if (urls.length === 0) {
+    for (const k of apiKeys) pairs.push({ endpoint: null, apiKey: k })
+  } else if (apiKeys.length === 0) {
+    for (const u of urls) pairs.push({ endpoint: u, apiKey: null })
+  } else {
+    for (const u of urls) {
+      for (const k of apiKeys) pairs.push({ endpoint: u, apiKey: k })
+    }
+  }
+
+  const preferredUrl = labeled.endpoint || pickBestUrl(urls, text)
+  const preferredKey = labeled.apiKey ? maybeDecodeKey(labeled.apiKey) : pickBestKey(apiKeys)
+
+  pairs.sort((a, b) => {
+    const sa = scorePair(a, preferredUrl, preferredKey, text)
+    const sb = scorePair(b, preferredUrl, preferredKey, text)
+    return sb - sa
+  })
+
+  // Cap combinatorial explosion (e.g. many footer links × keys)
+  return pairs.slice(0, 12)
+}
+
+/**
+ * @param {CandidatePair} pair
+ * @param {string|null} preferredUrl
+ * @param {string|null} preferredKey
+ * @param {string} text
+ */
+function scorePair(pair, preferredUrl, preferredKey, text) {
+  let s = 0
+  if (pair.endpoint && pair.apiKey) s += 2
+  if (preferredUrl && pair.endpoint === preferredUrl) s += 3
+  if (preferredKey && pair.apiKey === preferredKey) s += 3
+  if (pair.endpoint) {
+    const lower = pair.endpoint.toLowerCase()
+    if (/api\.|anthropic|openai|proxy|relay/.test(lower)) s += 1
+    // demote billing / docs / dashboard style URLs
+    if (/usage|billing|dashboard|docs\.|status\.|github\.com|linux\.do/.test(lower)) s -= 2
+  }
+  if (pair.apiKey) {
+    if (pair.apiKey.startsWith('sk-ant-')) s += 2
+    else if (pair.apiKey.startsWith('sk-')) s += 1
+    else if (/^g2a_/i.test(pair.apiKey)) s += 1
+  }
+  // slight preference for shorter path endpoints (often the real base)
+  if (pair.endpoint) {
+    try {
+      const path = new URL(pair.endpoint).pathname || '/'
+      if (path === '/' || path === '/v1' || path === '/v1/') s += 0.5
+    } catch {
+      /* ignore */
+    }
+  }
+  void text
+  return s
 }
 
 /**
@@ -1572,7 +1695,6 @@ function filterModelsForApp(models, app) {
 ;(function () {
   'use strict'
 
-  const BTN_ID = 'ccs-ld-import-btn'
   const ROOT_ID = 'ccs-ld-root'
   const Z = 2147483000
 
@@ -1582,10 +1704,8 @@ function filterModelsForApp(models, app) {
   let currentResult = null
   let currentModelInfo = null
   let currentDeeplink = null
-
-  function $(sel, root) {
-    return (root || document).querySelector(sel)
-  }
+  /** @type {string|null} */
+  let selectedModel = null
 
   function ensureRoot() {
     let host = document.getElementById(ROOT_ID)
@@ -1634,7 +1754,7 @@ function filterModelsForApp(models, app) {
     }
     .ccs-overlay.show { display: flex; }
     .ccs-card {
-      width: min(360px, 100%);
+      width: min(380px, 100%);
       background: #2c2e33;
       color: #e9ecef;
       border-radius: 12px;
@@ -1653,6 +1773,27 @@ function filterModelsForApp(models, app) {
     .ccs-warn {
       font-size: 11px; color: #fcc419; margin: -4px 0 12px; line-height: 1.45;
     }
+    .ccs-row {
+      display: flex; align-items: center; gap: 8px; margin-bottom: 10px;
+      font-size: 12px;
+    }
+    .ccs-row label { color: #adb5bd; white-space: nowrap; }
+    .ccs-row select {
+      flex: 1; min-width: 0;
+      background: #1a1b1e; color: #e9ecef; border: 1px solid #495057;
+      border-radius: 6px; padding: 6px 8px; font-size: 12px;
+    }
+    .ccs-cand {
+      display: none; align-items: center; gap: 8px; margin-bottom: 10px;
+      font-size: 12px; color: #ced4da;
+    }
+    .ccs-cand.show { display: flex; }
+    .ccs-cand button {
+      border: 1px solid #495057; background: #373a40; color: #fff;
+      border-radius: 6px; padding: 4px 10px; font-size: 12px; cursor: pointer;
+    }
+    .ccs-cand button:disabled { opacity: .4; cursor: not-allowed; }
+    .ccs-cand .ccs-cand-label { flex: 1; text-align: center; color: #adb5bd; }
     .ccs-apps { display: flex; gap: 8px; margin-bottom: 12px; }
     .ccs-apps button {
       flex: 1; border: 1px solid #495057; background: #373a40; color: #ced4da;
@@ -1708,6 +1849,15 @@ function filterModelsForApp(models, app) {
           <div class="ccs-meta" id="meta"></div>
           <div class="ccs-err" id="err" style="display:none"></div>
           <div class="ccs-fields" id="fields"></div>
+          <div class="ccs-cand" id="cand">
+            <button type="button" id="cand-prev" aria-label="上一组候选">‹</button>
+            <span class="ccs-cand-label" id="cand-label">候选 1/1</span>
+            <button type="button" id="cand-next" aria-label="下一组候选">›</button>
+          </div>
+          <div class="ccs-row" id="model-row" style="display:none">
+            <label for="model-select">model</label>
+            <select id="model-select"></select>
+          </div>
           <div class="ccs-warn" id="warn"></div>
           <div class="ccs-apps">
             <button type="button" data-app="claude" id="app-claude">Claude Code</button>
@@ -1735,6 +1885,9 @@ function filterModelsForApp(models, app) {
       shadow.getElementById('open').addEventListener('click', openImport)
       shadow.getElementById('app-claude').addEventListener('click', () => setApp('claude'))
       shadow.getElementById('app-codex').addEventListener('click', () => setApp('codex'))
+      shadow.getElementById('cand-prev').addEventListener('click', () => shiftCandidate(-1))
+      shadow.getElementById('cand-next').addEventListener('click', () => shiftCandidate(1))
+      shadow.getElementById('model-select').addEventListener('change', onModelSelect)
     }
     return { shadow, btn, overlay, toast }
   }
@@ -1752,9 +1905,6 @@ function filterModelsForApp(models, app) {
     if (!sel || sel.isCollapsed) return ''
     const plain = String(sel.toString() || '').trim()
     if (!plain) return ''
-    // Discourse often renders the API endpoint as a link whose visible text is
-    // only "base url" / "url" — the real address lives in href and is dropped by
-    // selection.toString(). Merge those hrefs back into the parse input.
     const anchors = collectAnchorsInSelection(sel)
     if (typeof enrichTextWithAnchorHrefs === 'function') {
       return String(enrichTextWithAnchorHrefs(plain, anchors) || plain).trim()
@@ -1763,7 +1913,6 @@ function filterModelsForApp(models, app) {
   }
 
   /**
-   * Collect <a href> elements that intersect the current selection.
    * @param {Selection} sel
    * @returns {Array<{text: string, href: string}>}
    */
@@ -1778,15 +1927,12 @@ function filterModelsForApp(models, app) {
         root.nodeType === 1 /* ELEMENT_NODE */ ? root : root.parentElement
       if (!rootEl) continue
 
-      // If the selection is inside a single <a>, commonAncestor may be the
-      // text node / the anchor itself — always walk up for nearest anchor.
       let nearest = rootEl.closest ? rootEl.closest('a[href]') : null
       if (!nearest && rootEl.tagName === 'A' && rootEl.getAttribute('href')) {
         nearest = rootEl
       }
       if (nearest) pushAnchor(nearest, out, seen)
 
-      // Also scan descendants that intersect the range
       const candidates = rootEl.querySelectorAll
         ? rootEl.querySelectorAll('a[href]')
         : []
@@ -1795,8 +1941,6 @@ function filterModelsForApp(models, app) {
         pushAnchor(a, out, seen)
       }
 
-      // Boundary containers: start/end may sit on an anchor not under rootEl's
-      // query path in some edge trees.
       for (const boundary of [range.startContainer, range.endContainer]) {
         const el =
           boundary.nodeType === 1 ? boundary : boundary.parentElement
@@ -1821,7 +1965,6 @@ function filterModelsForApp(models, app) {
     })
   }
 
-  /** Whether a Range intersects a node (inclusive of fully-contained nodes). */
   function rangeIntersectsNode(range, node) {
     if (!range || !node) return false
     try {
@@ -1834,7 +1977,6 @@ function filterModelsForApp(models, app) {
     try {
       const nodeRange = document.createRange()
       nodeRange.selectNode(node)
-      // compareBoundaryPoints: START_TO_END / END_TO_START
       return (
         range.compareBoundaryPoints(Range.END_TO_START, nodeRange) < 0 &&
         range.compareBoundaryPoints(Range.START_TO_END, nodeRange) > 0
@@ -1896,15 +2038,63 @@ function filterModelsForApp(models, app) {
       return
     }
     currentResult = result
-    // Extract models from original selection (single model auto-applies via modelInfo.model)
-    currentModelInfo =
-      typeof extractModels === 'function' ? extractModels(text) : { model: null, models: [] }
-    if (currentModelInfo.models && currentModelInfo.models.length === 1 && !currentModelInfo.model) {
-      currentModelInfo.model = currentModelInfo.models[0]
-    }
     selectedApp = result.app
+    selectedModel = null
+    refreshModelInfo(text)
     rebuildDeeplink()
     renderCard(result)
+  }
+
+  /**
+   * Recompute models for current app (filters by app when possible).
+   * @param {string} [sourceText]
+   */
+  function refreshModelInfo(sourceText) {
+    const text = sourceText || lastSelectionText || ''
+    let info =
+      typeof extractModels === 'function'
+        ? extractModels(text)
+        : { model: null, haikuModel: null, sonnetModel: null, opusModel: null, models: [] }
+
+    let models = info.models || []
+    if (typeof filterModelsForApp === 'function' && selectedApp) {
+      models = filterModelsForApp(models, selectedApp)
+    }
+
+    if (selectedModel && models.includes(selectedModel)) {
+      info = { ...info, models, model: selectedModel }
+    } else if (models.length === 1) {
+      selectedModel = models[0]
+      info = { ...info, models, model: models[0] }
+    } else if (models.length > 1) {
+      const preferred =
+        (info.model && models.includes(info.model) && info.model) ||
+        models.find((m) => /sonnet/i.test(m)) ||
+        models[0]
+      selectedModel = preferred
+      info = { ...info, models, model: preferred }
+    } else {
+      selectedModel = null
+      info = {
+        model: null,
+        haikuModel: null,
+        sonnetModel: null,
+        opusModel: null,
+        models: [],
+      }
+    }
+
+    if (selectedApp === 'claude') {
+      info.haikuModel = models.find((m) => /haiku/i.test(m)) || null
+      info.sonnetModel = models.find((m) => /sonnet/i.test(m)) || null
+      info.opusModel = models.find((m) => /opus/i.test(m)) || null
+    } else {
+      info.haikuModel = null
+      info.sonnetModel = null
+      info.opusModel = null
+    }
+
+    currentModelInfo = info
   }
 
   function openErrorCard(msg) {
@@ -1912,6 +2102,8 @@ function filterModelsForApp(models, app) {
     shadow.getElementById('meta').textContent = ''
     shadow.getElementById('fields').style.display = 'none'
     shadow.getElementById('warn').textContent = ''
+    shadow.getElementById('cand').classList.remove('show')
+    shadow.getElementById('model-row').style.display = 'none'
     const err = shadow.getElementById('err')
     err.style.display = 'block'
     err.textContent = msg
@@ -1934,11 +2126,13 @@ function filterModelsForApp(models, app) {
 
     const conf = Math.round((result.confidence || 0) * 100)
     const modelCount = currentModelInfo?.models?.length || 0
+    const candCount = result.candidates?.length || result.candidateCount || 1
+    const candIdx = (result.candidateIndex || 0) + 1
     const ver =
       typeof SCRIPT_VERSION !== 'undefined' && SCRIPT_VERSION ? String(SCRIPT_VERSION) : 'dev'
     shadow.getElementById('meta').textContent =
       `识别：${result.source} · 置信度 ${conf}%` +
-      (result.candidateCount > 1 ? ` · 候选×${result.candidateCount}` : '') +
+      (candCount > 1 ? ` · 候选 ${candIdx}/${candCount}` : '') +
       (modelCount ? ` · 模型×${modelCount}` : '') +
       ` · v${ver}`
 
@@ -1961,11 +2155,37 @@ function filterModelsForApp(models, app) {
       <div><span class="k">app</span>${escapeHtml(selectedApp || '未选择')}</div>
     `
 
+    const candEl = shadow.getElementById('cand')
+    if (candCount > 1 && result.candidates && result.candidates.length > 1) {
+      candEl.classList.add('show')
+      shadow.getElementById('cand-label').textContent = `候选 ${candIdx}/${candCount}`
+      shadow.getElementById('cand-prev').disabled = (result.candidateIndex || 0) <= 0
+      shadow.getElementById('cand-next').disabled =
+        (result.candidateIndex || 0) >= result.candidates.length - 1
+    } else {
+      candEl.classList.remove('show')
+    }
+
+    const modelRow = shadow.getElementById('model-row')
+    const modelSelect = shadow.getElementById('model-select')
+    if (modelCount > 1) {
+      modelRow.style.display = 'flex'
+      modelSelect.innerHTML = currentModelInfo.models
+        .map(
+          (m) =>
+            `<option value="${escapeHtml(m)}"${m === currentModelInfo.model ? ' selected' : ''}>${escapeHtml(m)}</option>`,
+        )
+        .join('')
+    } else {
+      modelRow.style.display = 'none'
+      modelSelect.innerHTML = ''
+    }
+
     const warn = shadow.getElementById('warn')
     const warnings = [...(result.warnings || [])]
     if (!selectedApp) warnings.push('请选择导入到 Claude Code 或 Codex')
     if (modelCount === 1) warnings.push('已自动填入检测到的唯一模型')
-    else if (modelCount > 1) warnings.push(`检测到 ${modelCount} 个模型，已优先使用主模型写入深链`)
+    else if (modelCount > 1) warnings.push(`检测到 ${modelCount} 个模型，可在下方切换`)
     warn.textContent = warnings.join('；')
 
     syncAppButtons()
@@ -1973,8 +2193,29 @@ function filterModelsForApp(models, app) {
     overlay.classList.add('show')
   }
 
+  function shiftCandidate(delta) {
+    if (!currentResult || typeof selectCandidate !== 'function') return
+    const list = currentResult.candidates
+    if (!list || list.length < 2) return
+    const next = selectCandidate(currentResult, (currentResult.candidateIndex || 0) + delta)
+    currentResult = next
+    rebuildDeeplink()
+    renderCard(next)
+  }
+
+  function onModelSelect(e) {
+    const v = e.target && e.target.value
+    selectedModel = v || null
+    if (currentModelInfo) {
+      currentModelInfo = { ...currentModelInfo, model: selectedModel }
+    }
+    rebuildDeeplink()
+    if (currentResult) renderCard(currentResult)
+  }
+
   function setApp(app) {
     selectedApp = app
+    refreshModelInfo()
     rebuildDeeplink()
     if (currentResult) renderCard(currentResult)
   }
@@ -1989,7 +2230,10 @@ function filterModelsForApp(models, app) {
     currentDeeplink = null
     if (!currentResult || !selectedApp) return
     try {
-      currentDeeplink = buildDeeplink(currentResult, selectedApp, currentModelInfo)
+      const modelInfo = currentModelInfo
+        ? { ...currentModelInfo, model: selectedModel || currentModelInfo.model }
+        : null
+      currentDeeplink = buildDeeplink(currentResult, selectedApp, modelInfo)
     } catch (e) {
       currentDeeplink = null
     }
@@ -2049,7 +2293,6 @@ function filterModelsForApp(models, app) {
       return
     }
 
-    // Prefer original deeplink if user didn't need rebuild? Always use rebuilt for app override.
     const link = currentDeeplink
     const a = document.createElement('a')
     a.href = link
@@ -2064,12 +2307,8 @@ function filterModelsForApp(models, app) {
     }
     setTimeout(() => a.remove(), 0)
 
-    // Fallback: if protocol handler missing, page usually stays — copy link
-    setTimeout(() => {
-      copyText(link).then(() => {
-        showToast('已尝试打开 CC Switch；若无反应，深链已复制，请检查是否安装 CC Switch', 4000)
-      })
-    }, 600)
+    // Do NOT auto-copy the deeplink (contains apiKey). Use「复制深链」if protocol fails.
+    showToast('已尝试打开 CC Switch。若无反应，请点「复制深链」并确认已安装 CC Switch', 4200)
   }
 
   function escapeHtml(s) {
@@ -2093,7 +2332,6 @@ function filterModelsForApp(models, app) {
       const { btn } = getUi()
       if (btn.classList.contains('show')) updateSelectionUi()
     }, true)
-    // warm shadow root
     getUi()
   }
 

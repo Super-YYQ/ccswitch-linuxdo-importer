@@ -8,6 +8,7 @@ import {
   classifyApp,
   base64Encode,
   enrichTextWithAnchorHrefs,
+  selectCandidate,
 } from '../userscript/lib/core.mjs'
 
 describe('looksLikeConfig', () => {
@@ -343,6 +344,50 @@ describe('classifyApp', () => {
         apiKey: 'sk-abcdef',
       }),
       'codex',
+    )
+  })
+  it('ignores multi-model relay blurbs (gpt+claude+grok) without provider env', () => {
+    const text = `模型设置    gpt-5.5，gpt-5.6-sol，claude系列均会转发到grok4.5
+Base URL    https://sub.example.com
+API Key     sk-test-only-000000000000000000000000`
+    assert.equal(
+      classifyApp(text, {
+        endpoint: 'https://sub.example.com',
+        apiKey: 'sk-test-only-000000000000000000000000',
+      }),
+      null,
+    )
+  })
+  it('does not treat bare sk- alone as codex', () => {
+    assert.equal(
+      classifyApp('自建中转', {
+        endpoint: 'https://relay.example.org',
+        apiKey: 'sk-test-only-000000000000000000000000',
+      }),
+      null,
+    )
+  })
+})
+
+describe('selectCandidate', () => {
+  it('switches endpoint/apiKey among mixed multi-pair candidates', () => {
+    const text = `
+      url1 https://a.example.com
+      url2 https://b.example.com
+      key1 sk-ant-api03-aaaaaaaaaaaaaaaa
+      key2 sk-ant-api03-bbbbbbbbbbbbbbbb
+    `
+    const r = parseShareText(text)
+    assert.ok(r)
+    assert.ok(r.candidates && r.candidates.length >= 2, `candidates=${r.candidates?.length}`)
+    const second = selectCandidate(r, 1)
+    assert.equal(second.candidateIndex, 1)
+    assert.ok(second.endpoint)
+    assert.ok(second.apiKey)
+    // pair should be one of the known endpoints/keys
+    assert.ok(['https://a.example.com', 'https://b.example.com'].includes(second.endpoint))
+    assert.ok(
+      ['sk-ant-api03-aaaaaaaaaaaaaaaa', 'sk-ant-api03-bbbbbbbbbbbbbbbb'].includes(second.apiKey),
     )
   })
 })
