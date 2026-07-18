@@ -180,7 +180,98 @@
   function getSelectionText() {
     const sel = window.getSelection()
     if (!sel || sel.isCollapsed) return ''
-    return String(sel.toString() || '').trim()
+    const plain = String(sel.toString() || '').trim()
+    if (!plain) return ''
+    // Discourse often renders the API endpoint as a link whose visible text is
+    // only "base url" / "url" — the real address lives in href and is dropped by
+    // selection.toString(). Merge those hrefs back into the parse input.
+    const anchors = collectAnchorsInSelection(sel)
+    if (typeof enrichTextWithAnchorHrefs === 'function') {
+      return String(enrichTextWithAnchorHrefs(plain, anchors) || plain).trim()
+    }
+    return plain
+  }
+
+  /**
+   * Collect <a href> elements that intersect the current selection.
+   * @param {Selection} sel
+   * @returns {Array<{text: string, href: string}>}
+   */
+  function collectAnchorsInSelection(sel) {
+    const out = []
+    if (!sel || sel.rangeCount === 0) return out
+    const seen = new Set()
+    for (let i = 0; i < sel.rangeCount; i++) {
+      const range = sel.getRangeAt(i)
+      const root = range.commonAncestorContainer
+      const rootEl =
+        root.nodeType === 1 /* ELEMENT_NODE */ ? root : root.parentElement
+      if (!rootEl) continue
+
+      // If the selection is inside a single <a>, commonAncestor may be the
+      // text node / the anchor itself — always walk up for nearest anchor.
+      let nearest = rootEl.closest ? rootEl.closest('a[href]') : null
+      if (!nearest && rootEl.tagName === 'A' && rootEl.getAttribute('href')) {
+        nearest = rootEl
+      }
+      if (nearest) pushAnchor(nearest, out, seen)
+
+      // Also scan descendants that intersect the range
+      const candidates = rootEl.querySelectorAll
+        ? rootEl.querySelectorAll('a[href]')
+        : []
+      for (const a of candidates) {
+        if (!rangeIntersectsNode(range, a)) continue
+        pushAnchor(a, out, seen)
+      }
+
+      // Boundary containers: start/end may sit on an anchor not under rootEl's
+      // query path in some edge trees.
+      for (const boundary of [range.startContainer, range.endContainer]) {
+        const el =
+          boundary.nodeType === 1 ? boundary : boundary.parentElement
+        if (!el) continue
+        const a = el.closest ? el.closest('a[href]') : null
+        if (a) pushAnchor(a, out, seen)
+      }
+    }
+    return out
+  }
+
+  function pushAnchor(a, out, seen) {
+    if (!a || !a.getAttribute) return
+    const href = a.href || a.getAttribute('href') || ''
+    if (!href) return
+    const key = href + '|' + (a.textContent || '').trim()
+    if (seen.has(key)) return
+    seen.add(key)
+    out.push({
+      text: String(a.textContent || '').replace(/\s+/g, ' ').trim(),
+      href: String(href),
+    })
+  }
+
+  /** Whether a Range intersects a node (inclusive of fully-contained nodes). */
+  function rangeIntersectsNode(range, node) {
+    if (!range || !node) return false
+    try {
+      if (typeof range.intersectsNode === 'function') {
+        return range.intersectsNode(node)
+      }
+    } catch {
+      /* fall through */
+    }
+    try {
+      const nodeRange = document.createRange()
+      nodeRange.selectNode(node)
+      // compareBoundaryPoints: START_TO_END / END_TO_START
+      return (
+        range.compareBoundaryPoints(Range.END_TO_START, nodeRange) < 0 &&
+        range.compareBoundaryPoints(Range.START_TO_END, nodeRange) > 0
+      )
+    } catch {
+      return false
+    }
   }
 
   function getSelectionRect() {
@@ -277,7 +368,7 @@
       `识别：${result.source} · 置信度 ${conf}%` +
       (result.candidateCount > 1 ? ` · 候选×${result.candidateCount}` : '') +
       (modelCount ? ` · 模型×${modelCount}` : '') +
-      ' · v1.0.2'
+      ' · v1.0.4'
 
     const modelLine = currentModelInfo?.model
       ? escapeHtml(currentModelInfo.model) +

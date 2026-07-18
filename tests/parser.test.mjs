@@ -7,6 +7,7 @@ import {
   maskKey,
   classifyApp,
   base64Encode,
+  enrichTextWithAnchorHrefs,
 } from '../userscript/lib/core.mjs'
 
 describe('looksLikeConfig', () => {
@@ -184,6 +185,90 @@ c2stdGVzdC1vbmx5LTAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAw
       '今天天气不错，我们来讨论一下如何学习 Linux 内核以及写驱动的心得体会吧朋友们',
     )
     assert.equal(r, null)
+  })
+
+  it('fails to find endpoint when selection only has link label "base url" (Discourse onebox)', () => {
+    // Reproduces Snipaste_2026-07-18_09-09-59: [base url](https://...) shows as text "base url"
+    // without the real href in selection.toString().
+    const b64 =
+      'c2stdGVzdC1vbmx5LTAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAw'
+    const text = `API Key（Base64，请自行解码）
+${b64}
+base url`
+    const r = parseShareText(text)
+    assert.ok(r)
+    assert.equal(r.apiKey, 'sk-test-only-000000000000000000000000')
+    // endpoint missing — real URL only lived in <a href>
+    assert.equal(r.endpoint, null)
+  })
+
+  it('recovers endpoint after enriching selection with anchor hrefs', () => {
+    const b64 =
+      'c2stdGVzdC1vbmx5LTAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAw'
+    const selectionText = `API Key（Base64，请自行解码）
+${b64}
+base url`
+    const anchors = [{ text: 'base url', href: 'https://relay.example.net/v1' }]
+    const enriched = enrichTextWithAnchorHrefs(selectionText, anchors)
+    const r = parseShareText(enriched)
+    assert.ok(r)
+    assert.equal(r.endpoint, 'https://relay.example.net/v1')
+    assert.equal(r.apiKey, 'sk-test-only-000000000000000000000000')
+  })
+
+  it('decodes base64 key with CJK watermark 去除文中 injected (linux.do anti-scrape)', () => {
+    // Real share pattern: key is base64, but after decode a Chinese watermark sits mid-token.
+    // Example: sk-...去除文中... — strip non-ASCII noise, keep the sk- key.
+    const b64 =
+      'c2stdGVzdC1vbmx5LTIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIy'
+    const text = `API Key（Base64，请自行解码）
+${b64}
+base url：https://example.com`
+    const r = parseShareText(text)
+    assert.ok(r)
+    assert.equal(r.apiKey, 'sk-test-only-222222222222222222222222')
+    assert.equal(r.endpoint, 'https://example.com')
+  })
+})
+
+describe('enrichTextWithAnchorHrefs', () => {
+  it('appends hrefs when visible link text has no URL', () => {
+    const text = 'API Key xxx\nbase url'
+    const out = enrichTextWithAnchorHrefs(text, [
+      { text: 'base url', href: 'https://hidden.example.com/api' },
+    ])
+    assert.match(out, /https:\/\/hidden\.example\.com\/api/)
+    assert.match(out, /base\s*url/i)
+  })
+
+  it('does not duplicate href already present in selection text', () => {
+    const text = 'url：https://already.example.com\nkey：sk-xxx'
+    const out = enrichTextWithAnchorHrefs(text, [
+      { text: 'https://already.example.com', href: 'https://already.example.com' },
+    ])
+    const matches = out.match(/https:\/\/already\.example\.com/g) || []
+    assert.equal(matches.length, 1)
+  })
+
+  it('skips non-http(s) and empty anchors', () => {
+    const text = 'hello world enough chars here!!'
+    const out = enrichTextWithAnchorHrefs(text, [
+      { text: 'click', href: 'javascript:void(0)' },
+      { text: 'x', href: '' },
+      { text: 'mail', href: 'mailto:a@b.com' },
+    ])
+    assert.equal(out, text)
+  })
+
+  it('labels preferred: base url / url / endpoint anchors first', () => {
+    const text = 'see also docs and base url'
+    const out = enrichTextWithAnchorHrefs(text, [
+      { text: 'docs', href: 'https://docs.example.com/readme' },
+      { text: 'base url', href: 'https://api.example.com' },
+    ])
+    // both appended, but base-url labeled form for the preferred one
+    assert.match(out, /base\s*url\s*[:：]\s*https:\/\/api\.example\.com/i)
+    assert.match(out, /https:\/\/docs\.example\.com\/readme/)
   })
 })
 

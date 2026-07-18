@@ -27,7 +27,7 @@ const ui = fs.readFileSync(uiPath, 'utf8')
 const header = `// ==UserScript==
 // @name         CC Switch Importer for linux.do
 // @namespace    https://github.com/Super-YYQ/ccswitch-linuxdo-importer
-// @version      1.0.2
+// @version      1.0.4
 // @description  选中 linux.do 分享文本，一键导入 CC Switch（Claude Code / Codex，自动识别模型）
 // @author       CC Switch Importer Contributors
 // @match        https://linux.do/*

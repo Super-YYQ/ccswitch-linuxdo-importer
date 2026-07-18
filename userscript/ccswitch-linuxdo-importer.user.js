@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         CC Switch Importer for linux.do
 // @namespace    https://github.com/Super-YYQ/ccswitch-linuxdo-importer
-// @version      1.0.2
+// @version      1.0.4
 // @description  选中 linux.do 分享文本，一键导入 CC Switch（Claude Code / Codex，自动识别模型）
 // @author       CC Switch Importer Contributors
 // @match        https://linux.do/*
@@ -133,6 +133,121 @@ function normalizeShareText(text) {
     .replace(/[\u00A0\u202F\u2007]/g, ' ')
     .replace(/\r\n?/g, '\n')
     .trim()
+}
+
+/**
+ * Merge real URLs from selected <a href> into selection text.
+ * Discourse often shows link text as "base url" while the real endpoint only lives in href;
+ * window.getSelection().toString() drops those hrefs.
+ *
+ * @param {string} text - selection.toString()
+ * @param {Array<{text?: string, href?: string}>} anchors
+ * @returns {string}
+ */
+function enrichTextWithAnchorHrefs(text, anchors) {
+  const base = text == null ? '' : String(text)
+  if (!anchors || anchors.length === 0) return base
+
+  const existing = new Set(matchAll(base, URL_RE).map(cleanUrl))
+  for (const u of existing) {
+    // also mark raw occurrences
+    if (base.includes(u)) existing.add(u)
+  }
+
+  /** @type {Array<{label: string, href: string, preferred: boolean}>} */
+  const toAdd = []
+  for (const a of anchors) {
+    if (!a) continue
+    const href = unwrapHref(a.href)
+    if (!href || !/^https?:\/\//i.test(href)) continue
+    const cleaned = cleanUrl(href)
+    if (!cleaned || existing.has(cleaned) || base.includes(cleaned)) {
+      if (cleaned) existing.add(cleaned)
+      continue
+    }
+    const label = String(a.text || '').trim().replace(/\s+/g, ' ')
+    const preferred = isUrlLinkLabel(label)
+    toAdd.push({ label, href: cleaned, preferred })
+    existing.add(cleaned)
+  }
+
+  if (toAdd.length === 0) return base
+
+  // Prefer labeled base-url anchors first
+  toAdd.sort((a, b) => Number(b.preferred) - Number(a.preferred))
+
+  let out = base
+  const appended = []
+  for (const item of toAdd) {
+    if (item.preferred && item.label) {
+      // Replace bare label once with "label\uFF1Ahttps://..." so extractLabeledFields hits it
+      const labelRe = new RegExp(
+        `(${escapeRegExp(item.label)})(?!\\s*[:\uFF1A=]\\s*https?:)`,
+        'i',
+      )
+      if (labelRe.test(out)) {
+        out = out.replace(labelRe, `$1\uFF1A${item.href}`)
+        continue
+      }
+      appended.push(`${item.label}\uFF1A${item.href}`)
+    } else {
+      appended.push(item.href)
+    }
+  }
+  if (appended.length) out = `${out}\n${appended.join('\n')}`
+  return out
+}
+
+/** Visible link labels that usually stand for the API base URL on linux.do shares. */
+function isUrlLinkLabel(label) {
+  if (!label) return false
+  const s = label.trim()
+  if (
+    /^(?:url|base\s*url|base[_-]?url|endpoint|api\s*base|api[_-]?base|host|\u5730\u5740|\u63A5\u53E3|\u94FE\u63A5)(?:\b|[\uFF08(]|\d|$)/i.test(
+      s,
+    )
+  ) {
+    return true
+  }
+  // "base url 2", "Base URL", etc.
+  if (/base\s*url|endpoint|base[_-]?url/i.test(s) && s.length <= 40) return true
+  return false
+}
+
+/**
+ * Normalize anchor href: keep http(s), unwrap common click-trackers / nested URLs.
+ * @param {string|null|undefined} href
+ * @returns {string|null}
+ */
+function unwrapHref(href) {
+  if (!href) return null
+  let h = String(href).trim()
+  if (!h) return null
+  // ignore non-navigational schemes
+  if (/^(javascript|mailto|tel|data|#):/i.test(h)) return null
+  // nested https inside tracking / redirect URLs
+  try {
+    const m = h.match(/https?:\/\/[^\s"'<>]+/i)
+    if (m) {
+      // if the whole thing is already http(s), prefer parsing query redirects
+      if (/^https?:\/\//i.test(h)) {
+        try {
+          const u = new URL(h)
+          for (const key of ['url', 'u', 'target', 'redirect', 'to', 'link', 'dest']) {
+            const v = u.searchParams.get(key)
+            if (v && /^https?:\/\//i.test(v)) return cleanUrl(v)
+          }
+        } catch {
+          /* keep */
+        }
+        return cleanUrl(h)
+      }
+      return cleanUrl(m[0])
+    }
+  } catch {
+    /* keep */
+  }
+  return null
 }
 
 /**
@@ -917,6 +1032,7 @@ function extractLabeledFields(text) {
 
 /**
  * If value is base64 that decodes to a printable API token, return decoded; else original.
+ * Also strips common linux.do anti-scrape watermarks (CJK like \u300C\u53BB\u9664\u6587\u4E2D\u300D) injected into keys.
  */
 function maybeDecodeKey(value) {
   if (!value) return value
@@ -925,15 +1041,15 @@ function maybeDecodeKey(value) {
     .replace(/[\u200B-\u200D\uFEFF\u00AD\u2060]/g, '')
     .replace(/[\s\u00A0]+/g, '')
     .trim()
-  // already looks like a normal key
+  // already looks like a normal key (may still carry CJK watermark mid-token)
   if (/^(sk-ant-|sk-|g2a_|Bearer\s*)/i.test(v)) {
-    return v.replace(/^Bearer\s*/i, '')
+    return sanitizeApiKey(v.replace(/^Bearer\s*/i, ''))
   }
   // base64-ish (charset, often ends with =)
   if (!/^[A-Za-z0-9+/_-]+={0,2}$/.test(v) || v.length < 16) return v
   try {
-    const decoded = base64Decode(v).trim()
-    // decoded should look like a token: printable, no spaces, reasonable length
+    const decoded = sanitizeApiKey(base64Decode(v).trim())
+    // decoded should look like a token: printable ASCII, no spaces, reasonable length
     if (
       decoded.length >= 8 &&
       decoded.length <= 512 &&
@@ -954,6 +1070,33 @@ function maybeDecodeKey(value) {
     /* keep original */
   }
   return v
+}
+
+/**
+ * Strip non-ASCII watermarks (e.g. \u300C\u53BB\u9664\u6587\u4E2D\u300D) that linux.do injects into shared keys.
+ * Only applied when the result still looks like an API token prefix.
+ * @param {string} key
+ * @returns {string}
+ */
+function sanitizeApiKey(key) {
+  if (!key) return key
+  let k = String(key).replace(/[\u200B-\u200D\uFEFF\u00AD\u2060]/g, '').trim()
+  // Fast path: already pure ASCII token
+  if (/^[\x20-\x7E]+$/.test(k) && !/\s/.test(k)) {
+    return k.replace(/\s+/g, '')
+  }
+  // Drop non-ASCII (CJK watermarks etc.) and whitespace
+  const stripped = k.replace(/[^\x20-\x7E]/g, '').replace(/\s+/g, '')
+  // Only accept if it still looks like a known API key form after stripping
+  if (
+    stripped.length >= 8 &&
+    stripped.length <= 512 &&
+    /^(sk-ant-|sk-|g2a_)/i.test(stripped)
+  ) {
+    return stripped
+  }
+  // Unknown shape with non-ASCII: keep original (don't invent a key)
+  return k
 }
 
 /** Non-sk tokens that appear after key labels or as long secrets */
@@ -989,16 +1132,6 @@ function extractBase64DecodedKeys(text) {
       const decoded = maybeDecodeKey(t)
       if (decoded && decoded !== t && /^(sk-ant-|sk-|g2a_)/i.test(decoded)) {
         out.push(decoded)
-        continue
-      }
-      // maybeDecodeKey may return original; try explicit decode check
-      try {
-        const d = base64Decode(t).trim()
-        if (/^(sk-ant-|sk-|g2a_)/i.test(d) && !/\s/.test(d) && d.length >= 8) {
-          out.push(d)
-        }
-      } catch {
-        /* ignore */
       }
       continue
     }
@@ -1009,13 +1142,9 @@ function extractBase64DecodedKeys(text) {
   while ((m = re.exec(text)) !== null) {
     const token = m[1]
     if (token.startsWith('sk-') || token.startsWith('http')) continue
-    try {
-      const d = base64Decode(token).trim()
-      if (/^(sk-ant-|sk-|g2a_)/i.test(d) && !/\s/.test(d) && d.length >= 8 && d.length <= 512) {
-        out.push(d)
-      }
-    } catch {
-      /* ignore */
+    const decoded = maybeDecodeKey(token)
+    if (decoded && decoded !== token && /^(sk-ant-|sk-|g2a_)/i.test(decoded)) {
+      out.push(decoded)
     }
   }
   return unique(out)
@@ -1442,7 +1571,98 @@ function filterModelsForApp(models, app) {
   function getSelectionText() {
     const sel = window.getSelection()
     if (!sel || sel.isCollapsed) return ''
-    return String(sel.toString() || '').trim()
+    const plain = String(sel.toString() || '').trim()
+    if (!plain) return ''
+    // Discourse often renders the API endpoint as a link whose visible text is
+    // only "base url" / "url" — the real address lives in href and is dropped by
+    // selection.toString(). Merge those hrefs back into the parse input.
+    const anchors = collectAnchorsInSelection(sel)
+    if (typeof enrichTextWithAnchorHrefs === 'function') {
+      return String(enrichTextWithAnchorHrefs(plain, anchors) || plain).trim()
+    }
+    return plain
+  }
+
+  /**
+   * Collect <a href> elements that intersect the current selection.
+   * @param {Selection} sel
+   * @returns {Array<{text: string, href: string}>}
+   */
+  function collectAnchorsInSelection(sel) {
+    const out = []
+    if (!sel || sel.rangeCount === 0) return out
+    const seen = new Set()
+    for (let i = 0; i < sel.rangeCount; i++) {
+      const range = sel.getRangeAt(i)
+      const root = range.commonAncestorContainer
+      const rootEl =
+        root.nodeType === 1 /* ELEMENT_NODE */ ? root : root.parentElement
+      if (!rootEl) continue
+
+      // If the selection is inside a single <a>, commonAncestor may be the
+      // text node / the anchor itself — always walk up for nearest anchor.
+      let nearest = rootEl.closest ? rootEl.closest('a[href]') : null
+      if (!nearest && rootEl.tagName === 'A' && rootEl.getAttribute('href')) {
+        nearest = rootEl
+      }
+      if (nearest) pushAnchor(nearest, out, seen)
+
+      // Also scan descendants that intersect the range
+      const candidates = rootEl.querySelectorAll
+        ? rootEl.querySelectorAll('a[href]')
+        : []
+      for (const a of candidates) {
+        if (!rangeIntersectsNode(range, a)) continue
+        pushAnchor(a, out, seen)
+      }
+
+      // Boundary containers: start/end may sit on an anchor not under rootEl's
+      // query path in some edge trees.
+      for (const boundary of [range.startContainer, range.endContainer]) {
+        const el =
+          boundary.nodeType === 1 ? boundary : boundary.parentElement
+        if (!el) continue
+        const a = el.closest ? el.closest('a[href]') : null
+        if (a) pushAnchor(a, out, seen)
+      }
+    }
+    return out
+  }
+
+  function pushAnchor(a, out, seen) {
+    if (!a || !a.getAttribute) return
+    const href = a.href || a.getAttribute('href') || ''
+    if (!href) return
+    const key = href + '|' + (a.textContent || '').trim()
+    if (seen.has(key)) return
+    seen.add(key)
+    out.push({
+      text: String(a.textContent || '').replace(/\s+/g, ' ').trim(),
+      href: String(href),
+    })
+  }
+
+  /** Whether a Range intersects a node (inclusive of fully-contained nodes). */
+  function rangeIntersectsNode(range, node) {
+    if (!range || !node) return false
+    try {
+      if (typeof range.intersectsNode === 'function') {
+        return range.intersectsNode(node)
+      }
+    } catch {
+      /* fall through */
+    }
+    try {
+      const nodeRange = document.createRange()
+      nodeRange.selectNode(node)
+      // compareBoundaryPoints: START_TO_END / END_TO_START
+      return (
+        range.compareBoundaryPoints(Range.END_TO_START, nodeRange) < 0 &&
+        range.compareBoundaryPoints(Range.START_TO_END, nodeRange) > 0
+      )
+    } catch {
+      return false
+    }
   }
 
   function getSelectionRect() {
@@ -1539,7 +1759,7 @@ function filterModelsForApp(models, app) {
       `识别：${result.source} · 置信度 ${conf}%` +
       (result.candidateCount > 1 ? ` · 候选×${result.candidateCount}` : '') +
       (modelCount ? ` · 模型×${modelCount}` : '') +
-      ' · v1.0.2'
+      ' · v1.0.4'
 
     const modelLine = currentModelInfo?.model
       ? escapeHtml(currentModelInfo.model) +
