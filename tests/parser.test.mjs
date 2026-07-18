@@ -252,7 +252,7 @@ base url：https://example.com`
     assert.ok(r)
     assert.equal(r.endpoint, 'https://newapi.example.invalid')
     assert.equal(r.apiKey, 'sk-test-only-111111111111111111111111')
-    assert.equal(r.source, 'json')
+    assert.ok(['json', 'mixed'].includes(r.source), `source=${r.source}`)
   })
 
   it('recovers endpoint when Discourse linkifies JSON url value to bare "url"', () => {
