@@ -12,14 +12,20 @@ jobs:
   test-and-build:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [18, 20, 22]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: ${{ matrix.node }}
       - name: Test
         run: npm test
       - name: Build userscript
+        if: matrix.node == 20
         run: npm run build
       - name: Ensure committed userscript matches build
+        if: matrix.node == 20
         run: git diff --exit-code -- userscript/ccswitch-linuxdo-importer.user.js

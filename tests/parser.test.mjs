@@ -9,6 +9,7 @@ import {
   base64Encode,
   enrichTextWithAnchorHrefs,
   selectCandidate,
+  describeConfigPayload,
 } from '../userscript/lib/core.mjs'
 
 // Synthetic fixtures only — never paste live share secrets into the suite.
@@ -484,11 +485,41 @@ describe('selectCandidate', () => {
     assert.ok([SYNTH.endpointA, SYNTH.endpointB].includes(second.endpoint))
     assert.ok([SYNTH.skAntA, SYNTH.skAntB].includes(second.apiKey))
   })
+
+  it('defaults to same-block URL/key pairs instead of crossed best fields', () => {
+    // Grouped blocks: URL1+KEY1 then URL2+KEY2 — default must not be URL2×KEY1
+    const text = `
+url：${SYNTH.endpointA}
+key：${SYNTH.skAntA}
+
+url：${SYNTH.endpointB}
+key：${SYNTH.skAntB}
+`
+    const r = parseShareText(text)
+    assert.ok(r)
+    assert.equal(r.endpoint, SYNTH.endpointA)
+    assert.equal(r.apiKey, SYNTH.skAntA)
+  })
+})
+
+describe('looksLikeConfig · deeplink gate', () => {
+  it('accepts provider deeplinks', () => {
+    const link = `ccswitch://v1/import?resource=provider&app=claude&name=Shared&endpoint=${encodeURIComponent(SYNTH.endpoint)}&apiKey=${SYNTH.skAntDeeplink}`
+    assert.equal(looksLikeConfig(`一键导入：${link}`), true)
+  })
+
+  it('rejects non-provider deeplinks so the floating button stays hidden', () => {
+    for (const resource of ['mcp', 'prompt', 'skill']) {
+      const link = `ccswitch://v1/import?resource=${resource}&app=claude&name=X&endpoint=${encodeURIComponent(SYNTH.endpoint)}&apiKey=${SYNTH.skAnt}`
+      assert.equal(looksLikeConfig(`导入：${link}`), false, `resource=${resource}`)
+    }
+  })
 })
 
 describe('key prefix hints + alternate encodings', () => {
   it('parses base64 key body and prepends sk- from prose hint (linux.do style)', () => {
-    const body = 'JFkov3xTVxHRhYOGBBuD61tsSYK0Gcf1cZgqlQ3VSHXReuwk'
+    // Deterministic test-only body — never high-entropy “real key” shapes
+    const body = 'TESTONLY_PREFIX_BODY_00000000000000000000'
     const b64 = base64Encode(body)
     const text = `模型：grok-4.5
 key（base64）：${b64}
@@ -503,7 +534,7 @@ key（base64）：${b64}
   })
 
   it('parses base64 key body and prepends sk-ant- when that prefix is hinted', () => {
-    const body = 'api03-SYNTHETICBODYONLY1234567890abcd'
+    const body = 'TESTONLY_ANT_BODY_0000000000000000000000'
     const b64 = base64Encode(body)
     const text = `API Key（Base64）
 ${b64}
@@ -514,7 +545,7 @@ ${b64}
   })
 
   it('does not invent sk- prefix without a prose hint', () => {
-    const body = 'BareBodyNoPrefixHint1234567890abcd'
+    const body = 'TESTONLY_NOPREFIX_BODY_000000000000000000'
     const b64 = base64Encode(body)
     const text = `key（base64）：${b64}\n仅分享 body，无前缀说明`
     const r = parseShareText(text)
@@ -534,7 +565,7 @@ url：${SYNTH.endpointHex}`
   })
 
   it('peels double base64 (俩次base64) to sk- key', () => {
-    const key = 'sk-G7b1BRMAct1xLSM7Dcp3jkyBs21388hJAFjXQz5GHYOchO04sh5dCmlUvTzqDEWv'
+    const key = 'sk-test-double-base64-00000000000000000000'
     const inner = base64Encode(key)
     const outer = base64Encode(inner)
     const text = `俩次base64：${outer}
@@ -546,7 +577,7 @@ url：${SYNTH.endpoint}`
   })
 
   it('peels double base64 even without 俩次 label (whole-line token)', () => {
-    const key = 'sk-G7b1BRMAct1xLSM7Dcp3jkyBs21388hJAFjXQz5GHYOchO04sh5dCmlUvTzqDEWv'
+    const key = 'sk-test-double-base64-00000000000000000000'
     const outer = base64Encode(base64Encode(key))
     const text = `${outer}
 ${SYNTH.endpoint}`
@@ -606,6 +637,38 @@ describe('buildDeeplink', () => {
     assert.equal(r.config, null)
     const link = buildDeeplink({ ...r, app: r.app || 'claude' }, r.app || 'claude')
     assert.ok(!/[?&]config=/.test(link), `unexpected config in deeplink: ${link}`)
+  })
+
+  it('can omit full config when includeConfig is false', () => {
+    const obj = {
+      name: 'FullCfg',
+      env: {
+        ANTHROPIC_BASE_URL: SYNTH.endpoint,
+        ANTHROPIC_AUTH_TOKEN: SYNTH.skAnt,
+        ANTHROPIC_MODEL: 'claude-sonnet-4',
+      },
+      usageScript: 'echo usage',
+    }
+    const r = parseShareText(JSON.stringify(obj))
+    assert.ok(r)
+    assert.ok(r.config)
+    const withCfg = buildDeeplink({ ...r, app: 'claude' }, 'claude', null, { includeConfig: true })
+    const without = buildDeeplink({ ...r, app: 'claude' }, 'claude', null, { includeConfig: false })
+    assert.ok(/[?&]config=/.test(withCfg))
+    assert.ok(!/[?&]config=/.test(without), without)
+  })
+
+  it('describeConfigPayload lists fields and size', () => {
+    const cfg = JSON.stringify({
+      name: 'X',
+      env: { A: '1' },
+      usageScript: 'echo',
+    })
+    const info = describeConfigPayload(cfg)
+    assert.ok(info)
+    assert.ok(info.fields.includes('env'))
+    assert.ok(info.fields.includes('usageScript'))
+    assert.ok(info.sizeBytes > 10)
   })
 })
 

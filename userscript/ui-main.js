@@ -13,6 +13,8 @@
   let currentDeeplink = null
   /** @type {string|null} */
   let selectedModel = null
+  /** When result has full config, default on; user can uncheck to export endpoint/key only. */
+  let includeFullConfig = true
 
   function ensureRoot() {
     let host = document.getElementById(ROOT_ID)
@@ -130,6 +132,13 @@
     .ccs-err {
       color: #ff6b6b; font-size: 13px; padding: 8px 0 12px; line-height: 1.5;
     }
+    .ccs-config-opt {
+      display: none; align-items: flex-start; gap: 8px; margin: -2px 0 12px;
+      font-size: 12px; color: #ced4da; line-height: 1.45;
+    }
+    .ccs-config-opt.show { display: flex; }
+    .ccs-config-opt input { margin-top: 2px; }
+    .ccs-config-opt .ccs-config-meta { color: #868e96; font-size: 11px; margin-top: 2px; }
   `
 
   function getUi() {
@@ -165,6 +174,13 @@
             <label for="model-select">model</label>
             <select id="model-select"></select>
           </div>
+          <label class="ccs-config-opt" id="config-opt">
+            <input type="checkbox" id="include-config" checked />
+            <span>
+              <span>携带完整配置</span>
+              <div class="ccs-config-meta" id="config-meta"></div>
+            </span>
+          </label>
           <div class="ccs-warn" id="warn"></div>
           <div class="ccs-apps">
             <button type="button" data-app="claude" id="app-claude">Claude Code</button>
@@ -195,6 +211,7 @@
       shadow.getElementById('cand-prev').addEventListener('click', () => shiftCandidate(-1))
       shadow.getElementById('cand-next').addEventListener('click', () => shiftCandidate(1))
       shadow.getElementById('model-select').addEventListener('change', onModelSelect)
+      shadow.getElementById('include-config').addEventListener('change', onIncludeConfigChange)
     }
     return { shadow, btn, overlay, toast }
   }
@@ -347,6 +364,7 @@
     currentResult = result
     selectedApp = result.app
     selectedModel = null
+    includeFullConfig = Boolean(result.config)
     refreshModelInfo(text)
     rebuildDeeplink()
     renderCard(result)
@@ -453,6 +471,13 @@
           (modelCount > 3 ? '…' : '')
         : '—'
 
+    const configInfo =
+      result.config && typeof describeConfigPayload === 'function'
+        ? describeConfigPayload(result.config)
+        : result.config
+          ? { fields: [], sizeBytes: String(result.config).length }
+          : null
+
     const fields = shadow.getElementById('fields')
     fields.innerHTML = `
       <div><span class="k">name</span>${escapeHtml(result.name || '')}</div>
@@ -460,7 +485,31 @@
       <div><span class="k">apiKey</span>${escapeHtml(maskKey(result.apiKey || '') || '—')}</div>
       <div><span class="k">model</span>${modelLine}</div>
       <div><span class="k">app</span>${escapeHtml(selectedApp || '未选择')}</div>
+      ${
+        configInfo
+          ? `<div><span class="k">完整配置</span>${includeFullConfig ? '是（将写入深链）' : '否（仅 endpoint/key）'}</div>
+      <div><span class="k">额外字段</span>${escapeHtml(
+        (configInfo.fields || []).slice(0, 12).join('、') || '（非 JSON / 无字段名）',
+      )}${configInfo.fields && configInfo.fields.length > 12 ? '…' : ''}</div>
+      <div><span class="k">配置大小</span>${escapeHtml(formatBytes(configInfo.sizeBytes || 0))}</div>`
+          : ''
+      }
     `
+
+    const configOpt = shadow.getElementById('config-opt')
+    const includeCb = shadow.getElementById('include-config')
+    const configMeta = shadow.getElementById('config-meta')
+    if (configInfo) {
+      configOpt.classList.add('show')
+      includeCb.checked = includeFullConfig
+      const fieldPreview = (configInfo.fields || []).slice(0, 8).join('、') || '原始配置块'
+      configMeta.textContent = `额外字段：${fieldPreview}${
+        configInfo.fields && configInfo.fields.length > 8 ? '…' : ''
+      } · ${formatBytes(configInfo.sizeBytes || 0)}`
+    } else {
+      configOpt.classList.remove('show')
+      configMeta.textContent = ''
+    }
 
     const candEl = shadow.getElementById('cand')
     if (candCount > 1 && result.candidates && result.candidates.length > 1) {
@@ -520,6 +569,19 @@
     if (currentResult) renderCard(currentResult)
   }
 
+  function onIncludeConfigChange(e) {
+    includeFullConfig = !!(e.target && e.target.checked)
+    rebuildDeeplink()
+    if (currentResult) renderCard(currentResult)
+  }
+
+  function formatBytes(n) {
+    const b = Number(n) || 0
+    if (b < 1024) return `${b} B`
+    if (b < 1024 * 1024) return `${(b / 1024).toFixed(1)} KB`
+    return `${(b / (1024 * 1024)).toFixed(1)} MB`
+  }
+
   function setApp(app) {
     selectedApp = app
     refreshModelInfo()
@@ -540,7 +602,9 @@
       const modelInfo = currentModelInfo
         ? { ...currentModelInfo, model: selectedModel || currentModelInfo.model }
         : null
-      currentDeeplink = buildDeeplink(currentResult, selectedApp, modelInfo)
+      currentDeeplink = buildDeeplink(currentResult, selectedApp, modelInfo, {
+        includeConfig: includeFullConfig,
+      })
     } catch (e) {
       currentDeeplink = null
     }

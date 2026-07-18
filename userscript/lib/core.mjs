@@ -426,7 +426,9 @@ export function looksLikeConfig(text) {
   if (!text || text.trim().length < MIN_SELECTION_LEN) return false
   let t = repairBrokenBase64(normalizeShareText(text))
   if (t.length > MAX_SELECTION_LEN) t = t.slice(0, MAX_SELECTION_LEN)
-  if (DEEPLINK_RE.test(t)) return true
+  // Only provider deeplinks light the import button (mcp/prompt/skill must not)
+  const deep = extractDeeplink(t)
+  if (deep) return Boolean(parseDeeplink(deep))
   if (/ANTHROPIC_|OPENAI_|CODEX_|BASE_URL|API_KEY|apiKey|baseUrl|endpoint|Base\s*URL/i.test(t))
     return true
   if (/sk-ant-|sk-[A-Za-z0-9]{16,}/.test(t)) return true
@@ -484,7 +486,14 @@ function hasUsefulBase64Blob(text) {
  * @param {object} [modelInfo] - Optional model extraction result
  * @returns {string}
  */
-export function buildDeeplink(result, appOverride, modelInfo) {
+/**
+ * @param {ParseResult} result
+ * @param {AppKind} [appOverride]
+ * @param {object} [modelInfo] - Optional model extraction result
+ * @param {{ includeConfig?: boolean }} [options]
+ * @returns {string}
+ */
+export function buildDeeplink(result, appOverride, modelInfo, options) {
   const app = appOverride || result.app
   if (!app) {
     throw new Error('app is required (claude or codex)')
@@ -498,7 +507,8 @@ export function buildDeeplink(result, appOverride, modelInfo) {
   if (result.endpoint) params.set('endpoint', result.endpoint)
   if (result.apiKey) params.set('apiKey', result.apiKey)
 
-  if (result.config) {
+  const includeConfig = !options || options.includeConfig !== false
+  if (includeConfig && result.config) {
     params.set('config', base64Encode(result.config))
     params.set('configFormat', result.configFormat || 'json')
   }
@@ -515,6 +525,28 @@ export function buildDeeplink(result, appOverride, modelInfo) {
 
   // URLSearchParams encodes spaces as +, deep links often prefer %20 — fine for most handlers
   return `ccswitch://v1/import?${params.toString()}`
+}
+
+/**
+ * Summarize attached full-config payload for confirm-card disclosure.
+ * @param {string|null|undefined} config
+ * @returns {{ fields: string[], sizeBytes: number }|null}
+ */
+export function describeConfigPayload(config) {
+  if (!config) return null
+  const raw = String(config)
+  const sizeBytes = typeof Buffer !== 'undefined' ? Buffer.byteLength(raw, 'utf8') : raw.length
+  /** @type {string[]} */
+  let fields = []
+  try {
+    const obj = JSON.parse(raw)
+    if (obj && typeof obj === 'object' && !Array.isArray(obj)) {
+      fields = Object.keys(obj)
+    }
+  } catch {
+    fields = []
+  }
+  return { fields, sizeBytes }
 }
 
 /**
@@ -1224,6 +1256,7 @@ function tryParseMixed(text) {
 
 /**
  * Rank endpoint×key pairs for mixed shares. Labeled fields pin when present.
+ * Prefer same-line / adjacent-line pairs over independent “best URL × best key”.
  * @param {string[]} urls
  * @param {string[]} apiKeys
  * @param {string} text
@@ -1231,8 +1264,11 @@ function tryParseMixed(text) {
  * @returns {CandidatePair[]}
  */
 function buildCandidatePairs(urls, apiKeys, text, labeled) {
-  const preferredUrl = labeled.endpoint || pickBestUrl(urls, text)
-  const preferredKey = labeled.apiKey ? decodeKeyBody(labeled.apiKey) : pickBestKey(apiKeys)
+  const preferredUrl = labeled.endpoint || null
+  const preferredKey = labeled.apiKey ? decodeKeyBody(labeled.apiKey) : null
+
+  const urlLocs = locateValues(text, urls)
+  const keyLocs = locateValues(text, apiKeys)
 
   /** @type {CandidatePair[]} */
   const pairs = []
@@ -1246,15 +1282,31 @@ function buildCandidatePairs(urls, apiKeys, text, labeled) {
     return pairs.length < MAX_CANDIDATES
   }
 
-  // Preferred pair first (labeled / best-scored)
   if (urls.length && apiKeys.length) {
-    add(preferredUrl || urls[0], preferredKey || apiKeys[0])
-    // Zip by index — same-paragraph shares often list urlN/keyN in order
+    // 1) Labeled pair if both present
+    if (preferredUrl && preferredKey) add(preferredUrl, preferredKey)
+
+    // 2) Same-line / adjacent-line proximity pairs (sorted by distance)
+    /** @type {Array<{u: string, k: string, dist: number}>} */
+    const prox = []
+    for (const u of urlLocs) {
+      for (const k of keyLocs) {
+        const dist = locationDistance(u, k)
+        prox.push({ u: u.value, k: k.value, dist })
+      }
+    }
+    prox.sort((a, b) => a.dist - b.dist)
+    for (const p of prox) {
+      if (!add(p.u, p.k)) break
+    }
+
+    // 3) Zip by document order as a soft fallback
     const n = Math.max(urls.length, apiKeys.length)
     for (let i = 0; i < n && pairs.length < MAX_CANDIDATES; i++) {
-      add(urls[i] || preferredUrl || urls[0], apiKeys[i] || preferredKey || apiKeys[0])
+      add(urls[i] || urls[0], apiKeys[i] || apiKeys[0])
     }
-    // Remaining limited cartesian (already capped by MAX_URLS × MAX_KEYS)
+
+    // 4) Remaining limited cartesian
     outer: for (const u of urls) {
       for (const k of apiKeys) {
         if (!add(u, k)) break outer
@@ -1270,9 +1322,12 @@ function buildCandidatePairs(urls, apiKeys, text, labeled) {
     }
   }
 
+  const bestUrl = preferredUrl || (proxBestUrl(urlLocs, keyLocs) || pickBestUrl(urls, text))
+  const bestKey = preferredKey || (proxBestKey(urlLocs, keyLocs) || pickBestKey(apiKeys))
+
   pairs.sort((a, b) => {
-    const sa = scorePair(a, preferredUrl, preferredKey, text)
-    const sb = scorePair(b, preferredUrl, preferredKey, text)
+    const sa = scorePair(a, bestUrl, bestKey, text, urlLocs, keyLocs)
+    const sb = scorePair(b, bestUrl, bestKey, text, urlLocs, keyLocs)
     return sb - sa
   })
 
@@ -1280,16 +1335,104 @@ function buildCandidatePairs(urls, apiKeys, text, labeled) {
 }
 
 /**
+ * @typedef {{ value: string, index: number, line: number }} LocatedValue
+ */
+
+/**
+ * @param {string} text
+ * @param {string[]} values
+ * @returns {LocatedValue[]}
+ */
+function locateValues(text, values) {
+  /** @type {LocatedValue[]} */
+  const out = []
+  const src = String(text || '')
+  for (const value of values) {
+    if (!value) continue
+    const idx = src.indexOf(value)
+    if (idx < 0) {
+      out.push({ value, index: Number.MAX_SAFE_INTEGER, line: Number.MAX_SAFE_INTEGER })
+      continue
+    }
+    const line = src.slice(0, idx).split(/\r?\n/).length - 1
+    out.push({ value, index: idx, line })
+  }
+  return out
+}
+
+/**
+ * @param {LocatedValue} a
+ * @param {LocatedValue} b
+ */
+function locationDistance(a, b) {
+  if (a.line === Number.MAX_SAFE_INTEGER || b.line === Number.MAX_SAFE_INTEGER) return 1e9
+  const lineDist = Math.abs(a.line - b.line)
+  if (lineDist === 0) return 0
+  // adjacent lines slightly worse than same line; farther grows quickly
+  return lineDist * 10 + Math.abs(a.index - b.index) / 1000
+}
+
+function proxBestUrl(urlLocs, keyLocs) {
+  if (!urlLocs.length) return null
+  if (!keyLocs.length) return urlLocs[0].value
+  let best = null
+  let bestD = Infinity
+  for (const u of urlLocs) {
+    for (const k of keyLocs) {
+      const d = locationDistance(u, k)
+      if (d < bestD) {
+        bestD = d
+        best = u.value
+      }
+    }
+  }
+  return best
+}
+
+function proxBestKey(urlLocs, keyLocs) {
+  if (!keyLocs.length) return null
+  if (!urlLocs.length) return keyLocs[0].value
+  let best = null
+  let bestD = Infinity
+  for (const u of urlLocs) {
+    for (const k of keyLocs) {
+      const d = locationDistance(u, k)
+      if (d < bestD) {
+        bestD = d
+        best = k.value
+      }
+    }
+  }
+  return best
+}
+
+/**
  * @param {CandidatePair} pair
  * @param {string|null} preferredUrl
  * @param {string|null} preferredKey
  * @param {string} text
+ * @param {LocatedValue[]} [urlLocs]
+ * @param {LocatedValue[]} [keyLocs]
  */
-function scorePair(pair, preferredUrl, preferredKey, text) {
+function scorePair(pair, preferredUrl, preferredKey, text, urlLocs, keyLocs) {
   let s = 0
   if (pair.endpoint && pair.apiKey) s += 2
   if (preferredUrl && pair.endpoint === preferredUrl) s += 3
   if (preferredKey && pair.apiKey === preferredKey) s += 3
+
+  // Proximity boost: same/adjacent lines beat independent “best” fields
+  if (pair.endpoint && pair.apiKey && urlLocs && keyLocs) {
+    const u = urlLocs.find((x) => x.value === pair.endpoint)
+    const k = keyLocs.find((x) => x.value === pair.apiKey)
+    if (u && k) {
+      const d = locationDistance(u, k)
+      if (d === 0) s += 4
+      else if (d <= 10) s += 3
+      else if (d <= 30) s += 1.5
+      else if (d < 1e8) s += 0.5
+    }
+  }
+
   if (pair.endpoint) {
     const lower = pair.endpoint.toLowerCase()
     if (/api\.|anthropic|openai|proxy|relay/.test(lower)) s += 1
@@ -1353,14 +1496,18 @@ function lookLikeKeyValue(v) {
 function assignLabeledField(result, kind, value) {
   if (!kind || value == null || value === '') return
   if (kind === 'url') {
+    // First labeled URL wins — later pairs become candidates via mixed scan
+    if (result.endpoint) return
     const u = (String(value).match(URL_RE) || [])[0]
     if (u) result.endpoint = cleanUrl(u)
     else if (/^https?:\/\//i.test(value)) result.endpoint = cleanUrl(value)
     else return
   } else if (kind === 'key') {
+    if (result.apiKey) return
     // raw token — finalizeResult runs normalizeApiKey once
     result.apiKey = String(value).replace(/\s+/g, '')
   } else if (kind === 'name') {
+    if (result.name) return
     result.name = String(value).trim()
   }
   result.hit = true
