@@ -40,7 +40,7 @@
    - 或复制 [`userscript/ccswitch-linuxdo-importer.user.js`](./userscript/ccswitch-linuxdo-importer.user.js) 全文到「添加新脚本」
 4. 访问 https://linux.do ，在帖子中选中一段配置文字
 
-确认安装版本：打开确认卡后，元信息末尾应显示 **v1.1.3**。
+确认安装版本：打开确认卡后，元信息末尾应显示当前 `package.json` 版本（例如 **v1.1.5**）。
 
 ---
 
@@ -141,6 +141,7 @@ npm run check
 
 ## 变更摘要
 
+- **v1.1.5** — 审查加固：拒绝非 provider 深链；简单 JSON 不再整包 config；解析大小/候选预算；测试夹具改为合成密钥且日志脱敏
 - **v1.1.4** — 识别 `tp-`（token-plan 等）Key 前缀；中文粘连 Base64（`…佬友们用dHAt…`）也能抽出 Key
 - **v1.1.3** — 支持「俩次 base64」嵌套解码（多层 peel 到 `sk-` / `g2a_`）；识别 `base64：` / `俩次base64：` 标签
 - **v1.1.2** — 精简 A：统一 `normalizeApiKey` 出口；合并 labeled/table 扫描（标签表单源）；前缀提示改为内部函数（行为不变）

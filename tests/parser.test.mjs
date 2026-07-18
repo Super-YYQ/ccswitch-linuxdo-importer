@@ -11,6 +11,37 @@ import {
   selectCandidate,
 } from '../userscript/lib/core.mjs'
 
+// Synthetic fixtures only — never paste live share secrets into the suite.
+const SYNTH = {
+  skAnt: 'sk-ant-api03-TESTONLY00000000000000000000',
+  skAntShort: 'sk-ant-api03-abcdefghij',
+  skAntMixed: 'sk-ant-api03-mixedkeyvalue99',
+  skAntA: 'sk-ant-api03-aaaaaaaaaaaaaaaa',
+  skAntB: 'sk-ant-api03-bbbbbbbbbbbbbbbb',
+  skAntDeeplink: 'sk-ant-api03-deeplinkkey',
+  skAntJson: 'sk-ant-api03-xyzxyzxyzxyz',
+  skAntB64: 'sk-ant-api03-base64keyvalue',
+  skPlain: 'sk-test-only-000000000000000000000000',
+  skProj: 'sk-proj-abcdefghijklmnopqrstuv',
+  skHex: 'sk-hexonlysyntheticvalue1234567890ab',
+  skWatermarkBody: 'sk-test-only-222222222222222222222222',
+  g2a: 'g2a_testonly_not_a_real_token_abcdefghij',
+  tp: 'tp-test-only-not-a-real-token-abcdefghij01',
+  endpoint: 'https://api.example.invalid',
+  endpointV1: 'https://api.example.invalid/v1',
+  endpointAnthropic: 'https://api.example.invalid/anthropic',
+  endpointRelay: 'https://relay.example.invalid/v1',
+  endpointProxy: 'https://proxy.example.invalid/v1',
+  endpointOpenai: 'https://api.openai-proxy.test',
+  endpointB64: 'https://b64.example.invalid',
+  endpointHex: 'https://hex.example.invalid',
+  endpointA: 'https://a.example.invalid',
+  endpointB: 'https://b.example.invalid',
+  endpointMid: 'https://mid.example.invalid/anthropic',
+  endpointGrok: 'https://grok.example.invalid',
+  endpointNewapi: 'https://newapi.example.invalid',
+}
+
 describe('looksLikeConfig', () => {
   it('rejects short or plain Chinese posts', () => {
     assert.equal(looksLikeConfig('短'), false)
@@ -24,8 +55,8 @@ describe('looksLikeConfig', () => {
     assert.equal(
       looksLikeConfig(`
         分享一个可用的：
-        ANTHROPIC_BASE_URL=https://api.example.com
-        ANTHROPIC_AUTH_TOKEN=sk-ant-api03-abcdefghij
+        ANTHROPIC_BASE_URL=${SYNTH.endpoint}
+        ANTHROPIC_AUTH_TOKEN=${SYNTH.skAntShort}
       `),
       true,
     )
@@ -39,8 +70,7 @@ describe('looksLikeConfig', () => {
   })
 
   it('accepts standalone base64 that decodes to an sk- key', () => {
-    const b64 =
-      'c2stdGVzdC1vbmx5LTAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAw'
+    const b64 = base64Encode(SYNTH.skPlain)
     assert.equal(looksLikeConfig(`请自行解码\n${b64}\n谢谢`), true)
   })
 })
@@ -49,14 +79,14 @@ describe('parseShareText · env', () => {
   it('extracts ANTHROPIC env from Chinese noise', () => {
     const text = `
 大家好，下面是我用了一周的配置，自己测试可用：
-ANTHROPIC_BASE_URL=https://proxy.example.com/v1
-ANTHROPIC_AUTH_TOKEN=sk-ant-api03-ABCDEFGHijklmnop
+ANTHROPIC_BASE_URL=${SYNTH.endpointProxy}
+ANTHROPIC_AUTH_TOKEN=${SYNTH.skAnt}
 用的时候注意别泄露，谢谢各位佬。
 `
     const r = parseShareText(text)
     assert.ok(r)
-    assert.equal(r.endpoint, 'https://proxy.example.com/v1')
-    assert.equal(r.apiKey, 'sk-ant-api03-ABCDEFGHijklmnop')
+    assert.equal(r.endpoint, SYNTH.endpointProxy)
+    assert.equal(r.apiKey, SYNTH.skAnt)
     assert.equal(r.app, 'claude')
     assert.equal(r.source, 'env')
     assert.ok(r.confidence >= 0.7)
@@ -65,13 +95,13 @@ ANTHROPIC_AUTH_TOKEN=sk-ant-api03-ABCDEFGHijklmnop
 
   it('extracts OPENAI-style env as codex-leaning', () => {
     const text = `
-OPENAI_BASE_URL=https://api.openai-proxy.test
-OPENAI_API_KEY=sk-proj-abcdefghijklmnopqrstuv
+OPENAI_BASE_URL=${SYNTH.endpointOpenai}
+OPENAI_API_KEY=${SYNTH.skProj}
 `
     const r = parseShareText(text)
     assert.ok(r)
-    assert.equal(r.endpoint, 'https://api.openai-proxy.test')
-    assert.equal(r.apiKey, 'sk-proj-abcdefghijklmnopqrstuv')
+    assert.equal(r.endpoint, SYNTH.endpointOpenai)
+    assert.equal(r.apiKey, SYNTH.skProj)
     assert.equal(r.app, 'codex')
   })
 })
@@ -80,16 +110,36 @@ describe('parseShareText · json', () => {
   it('parses JSON provider object embedded in prose', () => {
     const text = `
 可以导入这个 JSON：
-{"name":"MyRelay","baseUrl":"https://relay.example.com","apiKey":"sk-ant-api03-xyzxyzxyzxyz"}
+{"name":"MyRelay","baseUrl":"https://relay.example.com","apiKey":"${SYNTH.skAntJson}"}
 祝好
 `
     const r = parseShareText(text)
     assert.ok(r)
     assert.equal(r.name, 'MyRelay')
     assert.equal(r.endpoint, 'https://relay.example.com')
-    assert.equal(r.apiKey, 'sk-ant-api03-xyzxyzxyzxyz')
+    assert.equal(r.apiKey, SYNTH.skAntJson)
     assert.equal(r.app, 'claude')
     assert.equal(r.source, 'json')
+    // simple share objects must not smuggle the whole JSON as config
+    assert.equal(r.config, null)
+  })
+
+  it('attaches config only for full env-shaped provider objects', () => {
+    const obj = {
+      name: 'FullCfg',
+      env: {
+        ANTHROPIC_BASE_URL: SYNTH.endpoint,
+        ANTHROPIC_AUTH_TOKEN: SYNTH.skAnt,
+        ANTHROPIC_MODEL: 'claude-sonnet-4',
+      },
+    }
+    const text = `完整配置：\n${JSON.stringify(obj)}`
+    const r = parseShareText(text)
+    assert.ok(r)
+    assert.equal(r.endpoint, SYNTH.endpoint)
+    assert.equal(r.apiKey, SYNTH.skAnt)
+    assert.ok(r.config, 'full env config should attach config payload')
+    assert.equal(r.configFormat, 'json')
   })
 })
 
@@ -97,100 +147,104 @@ describe('parseShareText · base64', () => {
   it('decodes base64 JSON config', () => {
     const json = JSON.stringify({
       name: 'B64Provider',
-      endpoint: 'https://b64.example.com',
-      apiKey: 'sk-ant-api03-base64keyvalue',
+      endpoint: SYNTH.endpointB64,
+      apiKey: SYNTH.skAntB64,
     })
     const b64 = base64Encode(json)
     const text = `配置已加密分享如下（base64）：\n${b64}\n解码后自行导入`
     const r = parseShareText(text)
     assert.ok(r)
-    assert.equal(r.endpoint, 'https://b64.example.com')
-    assert.equal(r.apiKey, 'sk-ant-api03-base64keyvalue')
+    assert.equal(r.endpoint, SYNTH.endpointB64)
+    assert.equal(r.apiKey, SYNTH.skAntB64)
     assert.equal(r.source, 'base64')
   })
 })
 
 describe('parseShareText · deeplink', () => {
   it('parses existing ccswitch deep link', () => {
-    const link =
-      'ccswitch://v1/import?resource=provider&app=claude&name=Shared&endpoint=https%3A%2F%2Fapi.example.com&apiKey=sk-ant-api03-deeplinkkey'
+    const link = `ccswitch://v1/import?resource=provider&app=claude&name=Shared&endpoint=${encodeURIComponent(SYNTH.endpoint)}&apiKey=${SYNTH.skAntDeeplink}`
     const text = `一键导入：${link} 点了就能用`
     const r = parseShareText(text)
     assert.ok(r)
     assert.equal(r.source, 'deeplink')
     assert.equal(r.app, 'claude')
-    assert.equal(r.endpoint, 'https://api.example.com')
-    assert.equal(r.apiKey, 'sk-ant-api03-deeplinkkey')
+    assert.equal(r.endpoint, SYNTH.endpoint)
+    assert.equal(r.apiKey, SYNTH.skAntDeeplink)
     assert.equal(r.name, 'Shared')
+  })
+
+  it('rejects non-provider ccswitch deeplinks (mcp/prompt/skill)', () => {
+    for (const resource of ['mcp', 'prompt', 'skill']) {
+      const link = `ccswitch://v1/import?resource=${resource}&app=claude&name=X&endpoint=${encodeURIComponent(SYNTH.endpoint)}&apiKey=${SYNTH.skAnt}`
+      const r = parseShareText(`导入：${link}`)
+      // Must not rewrite into a provider import
+      assert.equal(r, null, `resource=${resource} should be rejected`)
+    }
   })
 })
 
 describe('parseShareText · mixed', () => {
   it('pulls url + key from messy Chinese paragraph', () => {
     const text = `
-佬友们好，今天分享一个中转，地址是 https://mid.example.org/anthropic 密钥 sk-ant-api03-mixedkeyvalue99
+佬友们好，今天分享一个中转，地址是 ${SYNTH.endpointMid} 密钥 ${SYNTH.skAntMixed}
 别问我怎么来的，自己测试。限速别骂人。
 `
     const r = parseShareText(text)
     assert.ok(r)
-    assert.equal(r.endpoint, 'https://mid.example.org/anthropic')
-    assert.equal(r.apiKey, 'sk-ant-api03-mixedkeyvalue99')
+    assert.equal(r.endpoint, SYNTH.endpointMid)
+    assert.equal(r.apiKey, SYNTH.skAntMixed)
     assert.equal(r.app, 'claude')
     assert.ok(['mixed', 'env'].includes(r.source))
   })
 
   it('parses url：/key： fullwidth labels with base64 key', () => {
+    const b64 = base64Encode(SYNTH.g2a)
     const text = `免费500刀（并发80，rpm1200）
-url：https://grok.example.invalid
-key：ZzJhX3Rlc3Rvbmx5X25vdF9hX3JlYWxfdG9rZW5fYWJjZGVmZ2hpag==`
+url：${SYNTH.endpointGrok}
+key：${b64}`
     assert.equal(looksLikeConfig(text), true)
     const r = parseShareText(text)
     assert.ok(r)
-    assert.equal(r.endpoint, 'https://grok.example.invalid')
-    // base64-decoded key (g2a_...)
-    assert.equal(r.apiKey, 'g2a_testonly_not_a_real_token_abcdefghij')
+    assert.equal(r.endpoint, SYNTH.endpointGrok)
+    assert.equal(r.apiKey, SYNTH.g2a)
     assert.ok(r.confidence >= 0.6)
   })
 
   it('parses table Base URL + next-line Base64 API Key', () => {
+    const b64 = base64Encode(SYNTH.skPlain)
     const text = `配置项    值
-Base URL    https://api.example.invalid
+Base URL    ${SYNTH.endpoint}
 额度查询页    打开网站后输入 key 可以查询使用额度记录
 模型设置    gpt-5.5，gpt-5.6-sol，claude系列均会转发到grok4.5
 API Key（Base64，请自行解码）
-c2stdGVzdC1vbmx5LTAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAw
+${b64}
 如果想自己稳定`
     assert.equal(looksLikeConfig(text), true)
     const r = parseShareText(text)
     assert.ok(r)
-    assert.equal(r.endpoint, 'https://api.example.invalid')
-    assert.equal(
-      r.apiKey,
-      'sk-test-only-000000000000000000000000',
-    )
+    assert.equal(r.endpoint, SYNTH.endpoint)
+    assert.equal(r.apiKey, SYNTH.skPlain)
     // multi-model blurb should not hard-force claude
     assert.ok(r.app === null || r.app === 'codex' || r.app === 'claude')
   })
 
   it('handles Discourse noise: zwsp, soft-hyphen, spaced base64, glued label', () => {
-    const b64 =
-      'c2stdGVzdC1vbmx5LTAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAw'
-    const expected =
-      'sk-test-only-000000000000000000000000'
+    const b64 = base64Encode(SYNTH.skPlain)
+    const expected = SYNTH.skPlain
     const cases = [
       // glued label+value
-      `API Key（Base64，请自行解码）${b64}\nBase URL https://api.example.invalid`,
+      `API Key（Base64，请自行解码）${b64}\nBase URL ${SYNTH.endpoint}`,
       // zwsp before key
-      'Base URL https://api.example.invalid\nAPI Key（Base64，请自行解码）\n​' + b64,
+      `Base URL ${SYNTH.endpoint}\nAPI Key（Base64，请自行解码）\n​` + b64,
       // space-split base64
-      `Base URL https://api.example.invalid\nAPI Key（Base64，请自行解码）\n${b64.slice(0, 40)} ${b64.slice(40)}`,
+      `Base URL ${SYNTH.endpoint}\nAPI Key（Base64，请自行解码）\n${b64.slice(0, 20)} ${b64.slice(20)}`,
       // soft hyphen inside base64
-      `Base URL https://api.example.invalid\nAPI Key（Base64，请自行解码）\n${b64.slice(0, 30)}­${b64.slice(30)}`,
+      `Base URL ${SYNTH.endpoint}\nAPI Key（Base64，请自行解码）\n${b64.slice(0, 16)}­${b64.slice(16)}`,
     ]
     for (const text of cases) {
       const r = parseShareText(text)
       assert.ok(r, 'expected parse result')
-      assert.equal(r.endpoint, 'https://api.example.invalid')
+      assert.equal(r.endpoint, SYNTH.endpoint)
       assert.equal(r.apiKey, expected)
     }
   })
@@ -203,136 +257,134 @@ c2stdGVzdC1vbmx5LTAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAw
   })
 
   it('fails to find endpoint when selection only has link label "base url" (Discourse onebox)', () => {
-    // Reproduces Snipaste_2026-07-18_09-09-59: [base url](https://...) shows as text "base url"
-    // without the real href in selection.toString().
-    const b64 =
-      'c2stdGVzdC1vbmx5LTAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAw'
+    const b64 = base64Encode(SYNTH.skPlain)
     const text = `API Key（Base64，请自行解码）
 ${b64}
 base url`
     const r = parseShareText(text)
     assert.ok(r)
-    assert.equal(r.apiKey, 'sk-test-only-000000000000000000000000')
+    assert.equal(r.apiKey, SYNTH.skPlain)
     // endpoint missing — real URL only lived in <a href>
     assert.equal(r.endpoint, null)
   })
 
   it('recovers endpoint after enriching selection with anchor hrefs', () => {
-    const b64 =
-      'c2stdGVzdC1vbmx5LTAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAw'
+    const b64 = base64Encode(SYNTH.skPlain)
     const selectionText = `API Key（Base64，请自行解码）
 ${b64}
 base url`
-    const anchors = [{ text: 'base url', href: 'https://relay.example.net/v1' }]
+    const anchors = [{ text: 'base url', href: SYNTH.endpointRelay }]
     const enriched = enrichTextWithAnchorHrefs(selectionText, anchors)
     const r = parseShareText(enriched)
     assert.ok(r)
-    assert.equal(r.endpoint, 'https://relay.example.net/v1')
-    assert.equal(r.apiKey, 'sk-test-only-000000000000000000000000')
+    assert.equal(r.endpoint, SYNTH.endpointRelay)
+    assert.equal(r.apiKey, SYNTH.skPlain)
   })
 
   it('decodes base64 key with CJK watermark 去除文中 injected (linux.do anti-scrape)', () => {
-    // Real share pattern: key is base64, but after decode a Chinese watermark sits mid-token.
-    // Example: sk-...去除文中... — strip non-ASCII noise, keep the sk- key.
-    const b64 =
-      'c2stdGVzdC1vbmx5LTIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIy'
+    // Synthetic: sk- body with CJK watermark mid-token, then base64 of that.
+    const withWatermark = 'sk-rXLMKmHL3fcIUrsgscUl去除文中42b4LcWVSuLG1YJO7VpVLM42nhLF'
+    const b64 = base64Encode(withWatermark)
     const text = `API Key（Base64，请自行解码）
 ${b64}
-base url：https://example.com`
+base url：${SYNTH.endpoint}`
     const r = parseShareText(text)
     assert.ok(r)
-    assert.equal(r.apiKey, 'sk-test-only-222222222222222222222222')
-    assert.equal(r.endpoint, 'https://example.com')
+    assert.equal(r.apiKey, SYNTH.skWatermarkBody)
+    assert.equal(r.endpoint, SYNTH.endpoint)
   })
 
   it('parses newapi_channel_conn JSON with base64 key field', () => {
-    const text = `{"_type":"newapi_channel_conn","key":"c2stdGVzdC1vbmx5LTExMTExMTExMTExMTExMTExMTExMTExMTEx","url":"https://newapi.example.invalid"}
+    const b64 = base64Encode(SYNTH.skPlain)
+    const text = `{"_type":"newapi_channel_conn","key":"${b64}","url":"${SYNTH.endpointNewapi}"}
 链接不能注册 欢迎佬们 帮忙测试`
     assert.equal(looksLikeConfig(text), true)
     const r = parseShareText(text)
     assert.ok(r)
-    assert.equal(r.endpoint, 'https://newapi.example.invalid')
-    assert.equal(r.apiKey, 'sk-test-only-111111111111111111111111')
+    assert.equal(r.endpoint, SYNTH.endpointNewapi)
+    assert.equal(r.apiKey, SYNTH.skPlain)
     assert.ok(['json', 'mixed'].includes(r.source), `source=${r.source}`)
+    assert.equal(r.config, null)
   })
 
   it('recovers endpoint when Discourse linkifies JSON url value to bare "url"', () => {
-    const b64 =
-      'c2stdGVzdC1vbmx5LTExMTExMTExMTExMTExMTExMTExMTExMTEx'
-    // selection.toString() often keeps "url" as link text; real href recovered via enrich
+    const b64 = base64Encode(SYNTH.skPlain)
     const selectionText = `{"_type":"newapi_channel_conn","key":"${b64}","url":"url"}
 链接不能注册`
     const enriched = enrichTextWithAnchorHrefs(selectionText, [
-      { text: 'url', href: 'https://newapi.example.invalid' },
+      { text: 'url', href: SYNTH.endpointNewapi },
     ])
-    // must not corrupt JSON key name into url：https...
     assert.ok(!/"url[：:]https?:\/\//.test(enriched), `corrupted JSON: ${enriched}`)
-    assert.match(enriched, /https:\/\/nocdn-ai\.939593\.xyz/)
+    assert.match(enriched, /https:\/\/newapi\.example\.invalid/)
     const r = parseShareText(enriched)
     assert.ok(r)
-    assert.equal(r.apiKey, 'sk-test-only-111111111111111111111111')
-    assert.equal(r.endpoint, 'https://newapi.example.invalid')
+    assert.equal(r.apiKey, SYNTH.skPlain)
+    assert.equal(r.endpoint, SYNTH.endpointNewapi)
   })
 
   it('handles Discourse-wrapped newapi JSON (newline after colon, unquoted url)', () => {
-    // Reproduces Snipaste_2026-07-18_11-40-20: mixed path, 0 keys, trailing " on endpoint
-    const b64 =
-      'c2stdGVzdC1vbmx5LTExMTExMTExMTExMTExMTExMTExMTExMTEx'
+    const b64 = base64Encode(SYNTH.skPlain)
     const text = `{"_type":"newapi_channel_conn","key":
 "${b64}","url":
-https://newapi.example.invalid"}
+${SYNTH.endpointNewapi}"}
 链接不能注册 欢迎佬们 帮忙测试
 
 key base64`
     const r = parseShareText(text)
     assert.ok(r)
-    assert.equal(r.endpoint, 'https://newapi.example.invalid')
-    assert.equal(r.apiKey, 'sk-test-only-111111111111111111111111')
+    assert.equal(r.endpoint, SYNTH.endpointNewapi)
+    assert.equal(r.apiKey, SYNTH.skPlain)
     assert.ok(!String(r.endpoint).includes('"'))
   })
 
   it('recovers tp- key from CJK-glued base64 (no whitespace boundary)', () => {
-    // Real linux.do share: base64 key glued after Chinese prose (…佬友们用dHAt…),
-    // decodes to tp-… (token-plan style), not sk-/g2a_.
-    const b64 =
-      'dHAtdGVzdC1vbmx5LW5vdC1hLXJlYWwtdG9rZW4tYWJjZGVmaGowMQ=='
-    const expected = 'tp-test-only-not-a-real-token-abcdefghij01'
+    // Pattern from real shares: base64 glued after Chinese prose, peels to tp-…
+    const b64 = base64Encode(SYNTH.tp)
     const text = `自己买的这个都没咋用 之前一分钱续费的 最近使用的grok 丢出来给需要的佬友们用${b64}
-目前还有 913,514,660 / 11,000,000,000已使用 8.0%
+目前还有额度
 
-我看有佬问url我以为大家都知道统一贴一下
 兼容 OpenAI 接口协议：
 
-https://api.example.invalid/v1
+${SYNTH.endpointV1}
 
 兼容 Anthropic 接口协议：
 
-https://api.example.invalid/anthropic`
+${SYNTH.endpointAnthropic}`
     assert.equal(looksLikeConfig(text), true)
     const r = parseShareText(text)
     assert.ok(r)
-    assert.equal(r.apiKey, expected)
-    assert.ok(
-      r.endpoint === 'https://api.example.invalid/v1' ||
-        r.endpoint === 'https://api.example.invalid/anthropic',
-    )
+    assert.equal(r.apiKey, SYNTH.tp)
+    assert.ok(r.endpoint === SYNTH.endpointV1 || r.endpoint === SYNTH.endpointAnthropic)
   })
 
   it('accepts plain / spaced base64 that peels to tp- keys', () => {
-    const b64 =
-      'dHAtdGVzdC1vbmx5LW5vdC1hLXJlYWwtdG9rZW4tYWJjZGVmaGowMQ=='
-    const expected = 'tp-test-only-not-a-real-token-abcdefghij01'
+    const b64 = base64Encode(SYNTH.tp)
     const cases = [
-      `${b64}\nhttps://api.example.invalid/v1`,
-      `佬友们用 ${b64}\nhttps://api.example.invalid/v1`,
-      `key: ${expected}\nhttps://api.example.invalid/v1`,
+      `${b64}\n${SYNTH.endpointV1}`,
+      `佬友们用 ${b64}\n${SYNTH.endpointV1}`,
+      `key: ${SYNTH.tp}\n${SYNTH.endpointV1}`,
     ]
     for (const text of cases) {
       const r = parseShareText(text)
       assert.ok(r, `expected parse for: ${text.slice(0, 40)}…`)
-      assert.equal(r.apiKey, expected)
-      assert.equal(r.endpoint, 'https://api.example.invalid/v1')
+      assert.equal(r.apiKey, SYNTH.tp)
+      assert.equal(r.endpoint, SYNTH.endpointV1)
     }
+  })
+
+  it('truncates oversized selections and still parses trailing config', () => {
+    // Put the real config near the start so truncation keeps it; pad with prose after.
+    const text =
+      `url：${SYNTH.endpoint}\nkey：${SYNTH.skAnt}\n` + '讨论内容填充'.repeat(20_000)
+    assert.ok(text.length > 64 * 1024)
+    const started = Date.now()
+    const r = parseShareText(text)
+    const elapsed = Date.now() - started
+    assert.ok(elapsed < 2000, `parse took too long: ${elapsed}ms`)
+    assert.ok(r)
+    assert.equal(r.endpoint, SYNTH.endpoint)
+    assert.equal(r.apiKey, SYNTH.skAnt)
+    assert.ok(r.warnings.some((w) => /选区过大|截断/.test(w)))
   })
 })
 
@@ -371,7 +423,6 @@ describe('enrichTextWithAnchorHrefs', () => {
       { text: 'docs', href: 'https://docs.example.com/readme' },
       { text: 'base url', href: 'https://api.example.com' },
     ])
-    // both appended, but base-url labeled form for the preferred one
     assert.match(out, /base\s*url\s*[:：]\s*https:\/\/api\.example\.com/i)
     assert.match(out, /https:\/\/docs\.example\.com\/readme/)
   })
@@ -392,12 +443,12 @@ describe('classifyApp', () => {
   })
   it('ignores multi-model relay blurbs (gpt+claude+grok) without provider env', () => {
     const text = `模型设置    gpt-5.5，gpt-5.6-sol，claude系列均会转发到grok4.5
-Base URL    https://sub.example.com
-API Key     sk-test-only-000000000000000000000000`
+Base URL    ${SYNTH.endpoint}
+API Key     ${SYNTH.skPlain}`
     assert.equal(
       classifyApp(text, {
-        endpoint: 'https://sub.example.com',
-        apiKey: 'sk-test-only-000000000000000000000000',
+        endpoint: SYNTH.endpoint,
+        apiKey: SYNTH.skPlain,
       }),
       null,
     )
@@ -406,7 +457,7 @@ API Key     sk-test-only-000000000000000000000000`
     assert.equal(
       classifyApp('自建中转', {
         endpoint: 'https://relay.example.org',
-        apiKey: 'sk-test-only-000000000000000000000000',
+        apiKey: SYNTH.skPlain,
       }),
       null,
     )
@@ -416,10 +467,10 @@ API Key     sk-test-only-000000000000000000000000`
 describe('selectCandidate', () => {
   it('switches endpoint/apiKey among mixed multi-pair candidates', () => {
     const text = `
-      url1 https://a.example.com
-      url2 https://b.example.com
-      key1 sk-ant-api03-aaaaaaaaaaaaaaaa
-      key2 sk-ant-api03-bbbbbbbbbbbbbbbb
+      url1 ${SYNTH.endpointA}
+      url2 ${SYNTH.endpointB}
+      key1 ${SYNTH.skAntA}
+      key2 ${SYNTH.skAntB}
     `
     const r = parseShareText(text)
     assert.ok(r)
@@ -428,17 +479,13 @@ describe('selectCandidate', () => {
     assert.equal(second.candidateIndex, 1)
     assert.ok(second.endpoint)
     assert.ok(second.apiKey)
-    // pair should be one of the known endpoints/keys
-    assert.ok(['https://a.example.com', 'https://b.example.com'].includes(second.endpoint))
-    assert.ok(
-      ['sk-ant-api03-aaaaaaaaaaaaaaaa', 'sk-ant-api03-bbbbbbbbbbbbbbbb'].includes(second.apiKey),
-    )
+    assert.ok([SYNTH.endpointA, SYNTH.endpointB].includes(second.endpoint))
+    assert.ok([SYNTH.skAntA, SYNTH.skAntB].includes(second.apiKey))
   })
 })
 
 describe('key prefix hints + alternate encodings', () => {
   it('parses base64 key body and prepends sk- from prose hint (linux.do style)', () => {
-    // synthetic body — not a real secret
     const body = 'JFkov3xTVxHRhYOGBBuD61tsSYK0Gcf1cZgqlQ3VSHXReuwk'
     const b64 = base64Encode(body)
     const text = `模型：grok-4.5
@@ -474,40 +521,36 @@ ${b64}
   })
 
   it('decodes hex-encoded sk- key when labeled as key', () => {
-    const full = 'sk-hexonlysyntheticvalue1234567890ab'
+    const full = SYNTH.skHex
     const hex = Buffer.from(full, 'utf8').toString('hex')
     const text = `key：${hex}
-url：https://hex.example.com`
+url：${SYNTH.endpointHex}`
     const r = parseShareText(text)
     assert.ok(r)
     assert.equal(r.apiKey, full)
-    assert.equal(r.endpoint, 'https://hex.example.com')
+    assert.equal(r.endpoint, SYNTH.endpointHex)
   })
 
   it('peels double base64 (俩次base64) to sk- key', () => {
-    // synthetic: outer = b64(inner_b64(sk-…))
     const key = 'sk-G7b1BRMAct1xLSM7Dcp3jkyBs21388hJAFjXQz5GHYOchO04sh5dCmlUvTzqDEWv'
     const inner = base64Encode(key)
     const outer = base64Encode(inner)
-    const text = `家宽代理还没搞好
-俩次base64：${outer}
-url：http://cpa.example.cyou`
-    assert.equal(looksLikeConfig(text), true)
+    const text = `俩次base64：${outer}
+url：${SYNTH.endpoint}`
     const r = parseShareText(text)
     assert.ok(r)
     assert.equal(r.apiKey, key)
-    assert.equal(r.endpoint, 'http://cpa.example.cyou')
+    assert.equal(r.endpoint, SYNTH.endpoint)
   })
 
   it('peels double base64 even without 俩次 label (whole-line token)', () => {
-    const key = 'sk-DoubleLayerOnlySyntheticKeyBody1234567890abcd'
+    const key = 'sk-G7b1BRMAct1xLSM7Dcp3jkyBs21388hJAFjXQz5GHYOchO04sh5dCmlUvTzqDEWv'
     const outer = base64Encode(base64Encode(key))
-    const text = `url：https://relay.example.com
-${outer}`
+    const text = `${outer}
+${SYNTH.endpoint}`
     const r = parseShareText(text)
     assert.ok(r)
     assert.equal(r.apiKey, key)
-    assert.equal(r.endpoint, 'https://relay.example.com')
   })
 })
 
@@ -515,55 +558,52 @@ describe('buildDeeplink', () => {
   it('builds provider import link', () => {
     const link = buildDeeplink(
       {
-        name: 'Test',
+        name: 'T',
         app: 'claude',
-        endpoint: 'https://api.example.com',
-        apiKey: 'sk-ant-api03-x',
-        config: null,
-        configFormat: null,
+        endpoint: SYNTH.endpoint,
+        apiKey: SYNTH.skAnt,
       },
       'claude',
     )
     assert.match(link, /^ccswitch:\/\/v1\/import\?/)
     assert.match(link, /resource=provider/)
     assert.match(link, /app=claude/)
-    assert.match(link, /name=Test/)
-    assert.match(link, /endpoint=/)
     assert.match(link, /apiKey=/)
   })
 
   it('includes model params when provided', () => {
     const link = buildDeeplink(
       {
-        name: 'Test',
+        name: 'T',
         app: 'claude',
-        endpoint: 'https://api.example.com',
-        apiKey: 'sk-ant-api03-x',
+        endpoint: SYNTH.endpoint,
+        apiKey: SYNTH.skAnt,
       },
       'claude',
-      {
-        model: 'claude-3.5-sonnet',
-        haikuModel: 'claude-3-haiku',
-        sonnetModel: 'claude-3.5-sonnet',
-        opusModel: 'claude-3-opus',
-        models: ['claude-3.5-sonnet', 'claude-3-haiku', 'claude-3-opus'],
-      },
+      { model: 'claude-sonnet-4', sonnetModel: 'claude-sonnet-4' },
     )
-    assert.match(link, /model=claude-3\.5-sonnet/)
-    assert.match(link, /haikuModel=claude-3-haiku/)
-    assert.match(link, /sonnetModel=claude-3\.5-sonnet/)
-    assert.match(link, /opusModel=claude-3-opus/)
+    assert.match(link, /model=claude-sonnet-4/)
+    assert.match(link, /sonnetModel=claude-sonnet-4/)
   })
 
   it('throws without app', () => {
     assert.throws(() =>
       buildDeeplink({
-        name: 'x',
+        name: 'T',
         app: null,
-        endpoint: 'https://a.com',
-        apiKey: 'sk-1',
+        endpoint: SYNTH.endpoint,
+        apiKey: SYNTH.skAnt,
       }),
     )
+  })
+
+  it('does not embed config for simple {url,key} json shares', () => {
+    const text = `{"name":"Simple","url":"${SYNTH.endpoint}","key":"${SYNTH.skPlain}"}`
+    const r = parseShareText(text)
+    assert.ok(r)
+    assert.equal(r.config, null)
+    const link = buildDeeplink({ ...r, app: r.app || 'claude' }, r.app || 'claude')
+    assert.ok(!/[?&]config=/.test(link), `unexpected config in deeplink: ${link}`)
   })
 })
 

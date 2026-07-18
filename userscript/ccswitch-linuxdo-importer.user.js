@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         CC Switch Importer for linux.do
 // @namespace    https://github.com/Super-YYQ/ccswitch-linuxdo-importer
-// @version      1.1.4
+// @version      1.1.5
 // @description  选中 linux.do 分享文本，一键导入 CC Switch（Claude Code / Codex，自动识别模型）
 // @author       CC Switch Importer Contributors
 // @match        https://linux.do/*
@@ -23,7 +23,7 @@
 ;(function (global) {
   'use strict';
 
-  const SCRIPT_VERSION = "1.1.4";
+  const SCRIPT_VERSION = "1.1.5";
 
   // ─── core (parse / classify / deeplink) ───
 /**
@@ -32,6 +32,13 @@
  */
 
 const MIN_SELECTION_LEN = 20
+/** Hard caps so adversarial / huge selections cannot freeze the tab. */
+const MAX_SELECTION_LEN = 64 * 1024
+const MAX_DECODED_LEN = 64 * 1024
+const MAX_JSON_OBJECTS = 16
+const MAX_URLS = 8
+const MAX_KEYS = 8
+const MAX_CANDIDATES = 12
 
 const ENV_URL_KEYS = [
   'ANTHROPIC_BASE_URL',
@@ -100,19 +107,26 @@ const VENDOR_KEY_RE = /\b(?:g2a_|tp-|nk-|pk-|rk-)[A-Za-z0-9_\-]{8,}\b/g
  */
 function parseShareText(text) {
   if (text == null) return null
-  const raw = normalizeShareText(text)
+  let raw = normalizeShareText(text)
   if (raw.length < MIN_SELECTION_LEN) return null
+  const oversized = raw.length > MAX_SELECTION_LEN
+  if (oversized) raw = raw.slice(0, MAX_SELECTION_LEN)
 
-  const cleaned = repairBrokenBase64(stripMarkdownFences(raw))
+  let cleaned = repairBrokenBase64(stripMarkdownFences(raw))
 
-  // 1. Existing ccswitch deep link
+  // 1. Existing ccswitch deep link (provider only)
   const deep = extractDeeplink(cleaned)
   if (deep) {
     const fromLink = parseDeeplink(deep)
     if (fromLink) {
       fromLink.deeplink = deep
+      if (oversized) {
+        fromLink.warnings = [...(fromLink.warnings || []), '选区过大，已截断后再解析']
+      }
       return fromLink
     }
+    // Non-provider / malformed: strip so mixed path cannot harvest apiKey from querystring
+    cleaned = cleaned.split(deep).join(' ')
   }
 
   // 2–6. Prefer complete (endpoint+key) results; otherwise stitch partial hits.
@@ -122,7 +136,11 @@ function parseShareText(text) {
   const toml = tryParseTomlLike(cleaned)
   const env = tryParseEnv(cleaned)
   const mixed = tryParseMixed(cleaned)
-  return finalizeResult(mergeParseResults([b64, json, toml, env, mixed]), cleaned)
+  const result = finalizeResult(mergeParseResults([b64, json, toml, env, mixed]), cleaned)
+  if (result && oversized) {
+    result.warnings = [...(result.warnings || []), '选区过大，已截断后再解析']
+  }
+  return result
 }
 
 /**
@@ -434,7 +452,8 @@ function applyKeyPrefixHints(key, text) {
  */
 function looksLikeConfig(text) {
   if (!text || text.trim().length < MIN_SELECTION_LEN) return false
-  const t = repairBrokenBase64(normalizeShareText(text))
+  let t = repairBrokenBase64(normalizeShareText(text))
+  if (t.length > MAX_SELECTION_LEN) t = t.slice(0, MAX_SELECTION_LEN)
   if (DEEPLINK_RE.test(t)) return true
   if (/ANTHROPIC_|OPENAI_|CODEX_|BASE_URL|API_KEY|apiKey|baseUrl|endpoint|Base\s*URL/i.test(t))
     return true
@@ -665,14 +684,20 @@ function extractDeeplink(text) {
  */
 function parseDeeplink(link) {
   try {
-    // URL() may not like custom schemes in all envs — manual parse
-    const qIndex = link.indexOf('?')
+    // Only provider imports — never rewrite mcp/prompt/skill into provider.
+    // Manual parse: URL() may not like custom schemes in all envs.
+    const raw = String(link || '').trim()
+    if (!/^ccswitch:/i.test(raw)) return null
+    // Accept ccswitch://v1/import?... or ccswitch:v1/import?...
+    const pathPart = raw.replace(/^ccswitch:\/\//i, '').replace(/^ccswitch:/i, '')
+    const qIndex = pathPart.indexOf('?')
     if (qIndex < 0) return null
-    const qs = link.slice(qIndex + 1)
+    const path = pathPart.slice(0, qIndex).replace(/\/+$/, '')
+    if (!/^v1\/import$/i.test(path)) return null
+    const qs = pathPart.slice(qIndex + 1)
     const params = new URLSearchParams(qs)
-    if (params.get('resource') && params.get('resource') !== 'provider') {
-      // still allow provider-like imports
-    }
+    const resource = params.get('resource')
+    if (resource !== 'provider') return null
     const app = normalizeApp(params.get('app'))
     const name = params.get('name') || defaultName()
     const endpoint = params.get('endpoint') || params.get('baseUrl') || null
@@ -853,12 +878,16 @@ function extractJsonishFields(text) {
 
 function extractJsonObjects(text) {
   const results = []
-  for (let i = 0; i < text.length; i++) {
+  const limit = Math.min(text.length, MAX_SELECTION_LEN)
+  for (let i = 0; i < limit; i++) {
     if (text[i] !== '{') continue
+    if (results.length >= MAX_JSON_OBJECTS) break
     let depth = 0
     let inStr = false
     let esc = false
-    for (let j = i; j < text.length; j++) {
+    // Cap scan window per brace so pathological unclosed `{` runs stay linear-ish
+    const end = Math.min(limit, i + MAX_DECODED_LEN)
+    for (let j = i; j < end; j++) {
       const c = text[j]
       if (inStr) {
         if (esc) {
@@ -932,8 +961,62 @@ function pickProviderFields(obj) {
   if (!ep) ep = scanObjectForUrl(obj)
   if (!key) key = scanObjectForKey(obj)
 
-  const hasConfigShape = !!(ep || key)
+  // Only attach raw JSON as config for full provider/app configs.
+  // Simple {url,key,name} / newapi shares must not smuggle hidden fields into the deeplink.
+  const hasConfigShape = isFullProviderConfig(obj, ep, key)
   return { name, endpoint: ep, apiKey: key, hasConfigShape }
+}
+
+/**
+ * True when obj looks like a full Claude/Codex provider config (env block, usage script, …),
+ * not a minimal share object with only url/key/name.
+ * @param {object} obj
+ * @param {string|null} ep
+ * @param {string|null} key
+ */
+function isFullProviderConfig(obj, ep, key) {
+  if (!obj || typeof obj !== 'object') return false
+  if (!ep && !key) return false
+  if (obj.usageScript || obj.usageAccessToken || obj.usage_script) return true
+  const env = obj.env || obj.environment
+  if (env && typeof env === 'object' && !Array.isArray(env)) {
+    const envKeys = Object.keys(env)
+    if (envKeys.some((k) => /ANTHROPIC|OPENAI|CODEX|BASE_URL|API_KEY|AUTH_TOKEN/i.test(k))) {
+      return true
+    }
+    if (envKeys.length >= 3) return true
+  }
+  if (obj.settings && typeof obj.settings === 'object' && !Array.isArray(obj.settings)) {
+    if (Object.keys(obj.settings).length >= 3) return true
+  }
+  // Nested models / transformers / custom headers etc. beyond the simple share shape
+  const simple = new Set([
+    'name',
+    'title',
+    'label',
+    'provider',
+    'providername',
+    '_type',
+    'type',
+    'endpoint',
+    'baseurl',
+    'base_url',
+    'baseurl',
+    'api_base',
+    'apibase',
+    'url',
+    'host',
+    'apikey',
+    'api_key',
+    'key',
+    'token',
+    'authtoken',
+    'auth_token',
+    'secret',
+    'access_token',
+  ])
+  const extras = Object.keys(obj).filter((k) => !simple.has(k.toLowerCase()))
+  return extras.length >= 2
 }
 
 function firstString(obj, keys) {
@@ -965,13 +1048,27 @@ function scanObjectForUrl(obj) {
 }
 
 function scanObjectForKey(obj) {
+  // Exact field names only — avoid matching monkey_token / description etc.
+  const exact = new Set([
+    'apikey',
+    'api_key',
+    'key',
+    'token',
+    'authtoken',
+    'auth_token',
+    'secret',
+    'access_token',
+    'authorization',
+  ])
   for (const [k, v] of Object.entries(obj)) {
-    if (typeof v === 'string' && /key|token|secret|auth/i.test(k) && v.trim().length >= 8) {
+    if (typeof v === 'string' && exact.has(String(k).toLowerCase()) && v.trim().length >= 8) {
       return v.trim()
     }
   }
   for (const v of Object.values(obj)) {
-    if (typeof v === 'string' && /^(sk-ant-|sk-|Bearer\s+)/i.test(v.trim())) return v.trim().replace(/^Bearer\s+/i, '')
+    if (typeof v === 'string' && KEY_PREFIX_BODY_RE.test(v.trim())) {
+      return sanitizeApiKey(v.trim().replace(/^Bearer\s+/i, ''))
+    }
   }
   return null
 }
@@ -1102,7 +1199,9 @@ function tryParseMixed(text) {
   const urls = unique([
     ...matchAll(text, URL_RE).map(cleanUrl),
     ...(labeled.endpoint ? [labeled.endpoint] : []),
-  ]).filter((u) => isHttpUrl(u))
+  ])
+    .filter((u) => isHttpUrl(u))
+    .slice(0, MAX_URLS)
 
   const keys = unique([
     ...matchAll(text, SK_ANT_RE),
@@ -1113,7 +1212,7 @@ function tryParseMixed(text) {
     ...(labeled.apiKey ? [labeled.apiKey] : []),
   ]).map((k) => maybeDecodeKey(k))
 
-  const apiKeys = unique(keys)
+  const apiKeys = unique(keys).slice(0, MAX_KEYS)
 
   if (urls.length === 0 && apiKeys.length === 0) return null
 
@@ -1160,20 +1259,44 @@ function tryParseMixed(text) {
  * @returns {CandidatePair[]}
  */
 function buildCandidatePairs(urls, apiKeys, text, labeled) {
-  /** @type {CandidatePair[]} */
-  const pairs = []
-  if (urls.length === 0) {
-    for (const k of apiKeys) pairs.push({ endpoint: null, apiKey: k })
-  } else if (apiKeys.length === 0) {
-    for (const u of urls) pairs.push({ endpoint: u, apiKey: null })
-  } else {
-    for (const u of urls) {
-      for (const k of apiKeys) pairs.push({ endpoint: u, apiKey: k })
-    }
-  }
-
   const preferredUrl = labeled.endpoint || pickBestUrl(urls, text)
   const preferredKey = labeled.apiKey ? decodeKeyBody(labeled.apiKey) : pickBestKey(apiKeys)
+
+  /** @type {CandidatePair[]} */
+  const pairs = []
+  const seen = new Set()
+  const add = (endpoint, apiKey) => {
+    if (pairs.length >= MAX_CANDIDATES) return false
+    const id = `${endpoint || ''}\0${apiKey || ''}`
+    if (seen.has(id)) return true
+    seen.add(id)
+    pairs.push({ endpoint: endpoint || null, apiKey: apiKey || null })
+    return pairs.length < MAX_CANDIDATES
+  }
+
+  // Preferred pair first (labeled / best-scored)
+  if (urls.length && apiKeys.length) {
+    add(preferredUrl || urls[0], preferredKey || apiKeys[0])
+    // Zip by index — same-paragraph shares often list urlN/keyN in order
+    const n = Math.max(urls.length, apiKeys.length)
+    for (let i = 0; i < n && pairs.length < MAX_CANDIDATES; i++) {
+      add(urls[i] || preferredUrl || urls[0], apiKeys[i] || preferredKey || apiKeys[0])
+    }
+    // Remaining limited cartesian (already capped by MAX_URLS × MAX_KEYS)
+    outer: for (const u of urls) {
+      for (const k of apiKeys) {
+        if (!add(u, k)) break outer
+      }
+    }
+  } else if (urls.length === 0) {
+    for (const k of apiKeys) {
+      if (!add(null, k)) break
+    }
+  } else {
+    for (const u of urls) {
+      if (!add(u, null)) break
+    }
+  }
 
   pairs.sort((a, b) => {
     const sa = scorePair(a, preferredUrl, preferredKey, text)
@@ -1181,8 +1304,7 @@ function buildCandidatePairs(urls, apiKeys, text, labeled) {
     return sb - sa
   })
 
-  // Cap combinatorial explosion (e.g. many footer links × keys)
-  return pairs.slice(0, 12)
+  return pairs.slice(0, MAX_CANDIDATES)
 }
 
 /**
@@ -1618,13 +1740,21 @@ function base64Encode(str) {
 
 function base64Decode(b64) {
   // normalize url-safe
-  let s = b64.replace(/-/g, '+').replace(/_/g, '/')
+  let s = String(b64 || '').replace(/-/g, '+').replace(/_/g, '/')
+  // Reject oversized tokens before allocating decoded buffers
+  if (s.length * 0.75 > MAX_DECODED_LEN) {
+    throw new Error('base64 payload too large')
+  }
   const pad = s.length % 4
   if (pad) s += '='.repeat(4 - pad)
+  let out
   if (typeof Buffer !== 'undefined') {
-    return Buffer.from(s, 'base64').toString('utf8')
+    out = Buffer.from(s, 'base64').toString('utf8')
+  } else {
+    out = decodeURIComponent(escape(atob(s)))
   }
-  return decodeURIComponent(escape(atob(s)))
+  if (out.length > MAX_DECODED_LEN) throw new Error('decoded payload too large')
+  return out
 }
 
 
