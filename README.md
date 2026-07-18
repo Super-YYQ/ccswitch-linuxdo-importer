@@ -40,7 +40,7 @@
    - 或复制 [`userscript/ccswitch-linuxdo-importer.user.js`](./userscript/ccswitch-linuxdo-importer.user.js) 全文到「添加新脚本」
 4. 访问 https://linux.do ，在帖子中选中一段配置文字
 
-确认安装版本：打开确认卡后，元信息末尾应显示 **v1.1.2**。
+确认安装版本：打开确认卡后，元信息末尾应显示 **v1.1.3**。
 
 ---
 
@@ -141,6 +141,7 @@ npm run check
 
 ## 变更摘要
 
+- **v1.1.3** — 支持「俩次 base64」嵌套解码（多层 peel 到 `sk-` / `g2a_`）；识别 `base64：` / `俩次base64：` 标签
 - **v1.1.2** — 精简 A：统一 `normalizeApiKey` 出口；合并 labeled/table 扫描（标签表单源）；前缀提示改为内部函数（行为不变）
 - **v1.1.1** — Base64/Hex Key 解码后根据文案「别忘了 sk- 前缀」等提示自动补 `sk-` / `sk-ant-` / `g2a_`；确认卡提示已补前缀
 - **v1.1.0** — 稳定 app 分类（模型列表不再误判）；多 URL/Key 候选可切换；确认卡模型下拉并按 app 过滤；打开导入不再自动复制含 Key 深链；CI + `npm run check`

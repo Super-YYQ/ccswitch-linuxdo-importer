@@ -1316,7 +1316,11 @@ function extractLabeledFields(text) {
   return result
 }
 
-/** Decode b64/hex + strip CJK watermark; no prefix hints. */
+/**
+ * Decode b64/hex + strip CJK watermark; no prefix hints.
+ * Supports nested base64 (e.g. "\u4FE9\u6B21base64" \u2192 outer b64 \u2192 inner b64 \u2192 sk-\u2026).
+ * Caps depth so random blobs do not loop forever.
+ */
 function decodeKeyBody(value) {
   if (!value) return value
   let v = String(value)
@@ -1326,31 +1330,58 @@ function decodeKeyBody(value) {
   if (/^(sk-ant-|sk-|g2a_|Bearer\s*)/i.test(v)) {
     return sanitizeApiKey(v.replace(/^Bearer\s*/i, ''))
   }
+
+  // Hex first (even length long enough)
   if (/^[0-9a-fA-F]{24,}$/.test(v) && v.length % 2 === 0) {
     try {
       const decoded = sanitizeApiKey(hexDecode(v).trim())
       if (isDecodableKeyBody(decoded) && (hasKeyPrefix(decoded) || decoded.length < v.length)) {
-        return decoded
+        return peelBase64Layers(decoded)
       }
     } catch {
       /* base64 next */
     }
   }
-  if (!/^[A-Za-z0-9+/_-]+={0,2}$/.test(v) || v.length < 16) return v
-  try {
-    const decoded = sanitizeApiKey(base64Decode(v).trim())
-    if (
-      isDecodableKeyBody(decoded) &&
-      (hasKeyPrefix(decoded) || decoded.includes('_') || decoded.length < v.length)
-    ) {
-      return decoded
+
+  return peelBase64Layers(v)
+}
+
+/** Peel nested base64 (e.g. 俩次base64) until sk-/g2a_ or layers stop. */
+function peelBase64Layers(value, maxDepth = 4) {
+  let v = String(value || '').trim()
+  if (!v) return v
+  if (hasKeyPrefix(v)) return sanitizeApiKey(v)
+
+  for (let depth = 0; depth < maxDepth; depth++) {
+    if (!/^[A-Za-z0-9+/_-]+={0,2}$/.test(v) || v.length < 16) break
+    let decoded
+    try {
+      decoded = base64Decode(v).trim()
+    } catch {
+      break
     }
-  } catch {
-    /* keep */
+    if (!decoded || decoded === v) break
+    const cleaned = sanitizeApiKey(decoded)
+    if (hasKeyPrefix(cleaned) && isDecodableKeyBody(cleaned)) {
+      return cleaned
+    }
+    // Intermediate pure base64 → peel again
+    if (
+      isDecodableKeyBody(cleaned) &&
+      /^[A-Za-z0-9+/_-]+={0,2}$/.test(cleaned) &&
+      cleaned.length >= 16 &&
+      cleaned.length < v.length
+    ) {
+      v = cleaned
+      continue
+    }
+    if (isDecodableKeyBody(cleaned) && (cleaned.includes('_') || cleaned.length < v.length)) {
+      return cleaned
+    }
+    break
   }
   return v
 }
-
 function maybeDecodeKey(value) {
   return decodeKeyBody(value)
 }
@@ -1406,54 +1437,55 @@ function sanitizeApiKey(key) {
   return k
 }
 
-/** Non-sk tokens that appear after key labels or as long secrets */
+/** Non-sk tokens after key labels, or base64 after "base64：" / "俩次base64" style notes. */
 function extractLooseKeys(text) {
   const out = []
-  // g2a_ / other vendor prefixes
   const vendor = text.match(/\b(?:g2a_|nk-|pk-|rk-)[A-Za-z0-9_\-]{8,}\b/g)
   if (vendor) out.push(...vendor)
-  // labeled base64 on same line already handled; also standalone long base64 after 密钥/key
+
+  // key：… / 密钥：… / base64：… / 两次base64：…
   const afterLabel = text.match(
-    /(?:key|api[_-]?key|api\s*key|token|密钥)\s*[:：]\s*([A-Za-z0-9+/_-]{20,}={0,2})/gi,
+    /(?:key|api[_-]?key|api\s*key|token|密钥|(?:俩|两|二)?次?\s*base\s*64|base\s*64)\s*[:：]\s*([A-Za-z0-9+/_-]{20,}={0,2})/gi,
   )
   if (afterLabel) {
     for (const chunk of afterLabel) {
       const m = chunk.match(/[:：]\s*([A-Za-z0-9+/_-]{20,}={0,2})/)
-      if (m) out.push(maybeDecodeKey(m[1]))
+      if (m) {
+        const decoded = decodeKeyBody(m[1])
+        if (decoded) out.push(decoded)
+      }
     }
   }
   return out
 }
 
 /**
- * Standalone base64 lines/tokens that decode to sk- / g2a_ style API keys.
- * Common on linux.do: "API Key（Base64，请自行解码）" + next line base64.
+ * Standalone base64 tokens that peel to sk- / g2a_ keys (incl. double base64).
  */
 function extractBase64DecodedKeys(text) {
   const out = []
-  const lines = text.split(/\r?\n/)
-  for (const line of lines) {
+  const consider = (token) => {
+    if (!token || token.startsWith('sk-') || token.startsWith('http')) return
+    const decoded = decodeKeyBody(token)
+    if (decoded && decoded !== token && hasKeyPrefix(decoded)) out.push(decoded)
+  }
+
+  for (const line of text.split(/\r?\n/)) {
     const t = line.trim()
-    // whole line is base64
+    // whole line, or "label：TOKEN" on one line
     if (/^[A-Za-z0-9+/_-]{24,}={0,2}$/.test(t)) {
-      const decoded = maybeDecodeKey(t)
-      if (decoded && decoded !== t && /^(sk-ant-|sk-|g2a_)/i.test(decoded)) {
-        out.push(decoded)
-      }
+      consider(t)
       continue
     }
+    const labeled = t.match(
+      /(?:key|api[_-]?key|token|密钥|base\s*64|(?:俩|两|二)?次?\s*base\s*64)\s*[:：]\s*([A-Za-z0-9+/_-]{24,}={0,2})\s*$/i,
+    )
+    if (labeled) consider(labeled[1])
   }
-  // also scan inline base64 blobs (not only whole lines)
-  const re = /(?:^|[\s"'`])([A-Za-z0-9+/]{32,}={0,2})(?=$|[\s"'`])/gm
+
+  const re = /(?:^|[\s"'`：:])([A-Za-z0-9+/]{32,}={0,2})(?=$|[\s"'`])/gm
   let m
-  while ((m = re.exec(text)) !== null) {
-    const token = m[1]
-    if (token.startsWith('sk-') || token.startsWith('http')) continue
-    const decoded = maybeDecodeKey(token)
-    if (decoded && decoded !== token && /^(sk-ant-|sk-|g2a_)/i.test(decoded)) {
-      out.push(decoded)
-    }
-  }
+  while ((m = re.exec(text)) !== null) consider(m[1])
   return unique(out)
 }
 

@@ -439,6 +439,32 @@ url：https://hex.example.com`
     assert.equal(r.apiKey, full)
     assert.equal(r.endpoint, 'https://hex.example.com')
   })
+
+  it('peels double base64 (俩次base64) to sk- key', () => {
+    // synthetic: outer = b64(inner_b64(sk-…))
+    const key = 'sk-G7b1BRMAct1xLSM7Dcp3jkyBs21388hJAFjXQz5GHYOchO04sh5dCmlUvTzqDEWv'
+    const inner = base64Encode(key)
+    const outer = base64Encode(inner)
+    const text = `家宽代理还没搞好
+俩次base64：${outer}
+url：http://cpa.example.cyou`
+    assert.equal(looksLikeConfig(text), true)
+    const r = parseShareText(text)
+    assert.ok(r)
+    assert.equal(r.apiKey, key)
+    assert.equal(r.endpoint, 'http://cpa.example.cyou')
+  })
+
+  it('peels double base64 even without 俩次 label (whole-line token)', () => {
+    const key = 'sk-DoubleLayerOnlySyntheticKeyBody1234567890abcd'
+    const outer = base64Encode(base64Encode(key))
+    const text = `url：https://relay.example.com
+${outer}`
+    const r = parseShareText(text)
+    assert.ok(r)
+    assert.equal(r.apiKey, key)
+    assert.equal(r.endpoint, 'https://relay.example.com')
+  })
 })
 
 describe('buildDeeplink', () => {
