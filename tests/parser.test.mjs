@@ -29,6 +29,19 @@ describe('looksLikeConfig', () => {
       true,
     )
   })
+
+  it('rejects long base64-ish noise without a decodable key/config', () => {
+    assert.equal(
+      looksLikeConfig('这是一段讨论 ' + 'A'.repeat(50) + ' 填充填充填充填充'),
+      false,
+    )
+  })
+
+  it('accepts standalone base64 that decodes to an sk- key', () => {
+    const b64 =
+      'c2stdGVzdC1vbmx5LTAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAw'
+    assert.equal(looksLikeConfig(`请自行解码\n${b64}\n谢谢`), true)
+  })
 })
 
 describe('parseShareText · env', () => {
@@ -46,6 +59,7 @@ ANTHROPIC_AUTH_TOKEN=sk-ant-api03-ABCDEFGHijklmnop
     assert.equal(r.app, 'claude')
     assert.equal(r.source, 'env')
     assert.ok(r.confidence >= 0.7)
+    assert.ok(r.confidence <= 1, `confidence must be <= 1, got ${r.confidence}`)
   })
 
   it('extracts OPENAI-style env as codex-leaning', () => {

@@ -266,7 +266,7 @@ export function repairBrokenBase64(text) {
   return out
 }
 
-/** Final pass: ensure apiKey is decoded and cleaned. */
+/** Final pass: ensure apiKey is decoded/cleaned and confidence stays in [0, 1]. */
 function finalizeResult(result) {
   if (!result) return null
   if (result.apiKey) {
@@ -274,6 +274,9 @@ function finalizeResult(result) {
   }
   if (result.endpoint) {
     result.endpoint = cleanUrl(normalizeShareText(result.endpoint))
+  }
+  if (typeof result.confidence === 'number') {
+    result.confidence = Math.min(1, Math.max(0, result.confidence))
   }
   return result
 }
@@ -299,9 +302,40 @@ export function looksLikeConfig(text) {
   }
   // url + base64-ish token (key often base64-encoded on linux.do)
   if (/https?:\/\//i.test(t) && /[A-Za-z0-9+/]{32,}={0,2}/.test(t)) return true
-  // base64 blob (allow fullwidth punctuation around it)
-  if (/(?:^|[\s"'`：:：])[A-Za-z0-9+/]{40,}={0,2}(?:$|[\s"'`])/.test(t)) return true
+  // standalone base64 only if it decodes to a key or config-shaped text (avoid AAAA… noise)
+  if (hasUsefulBase64Blob(t)) return true
   if (/\{[\s\S]*"(?:apiKey|api_key|baseUrl|endpoint|base_url)"[\s\S]*\}/.test(t)) return true
+  return false
+}
+
+/**
+ * True when a base64-ish token decodes to an API key or config-like payload.
+ * Prevents long random A-Z runs from lighting the import button.
+ * @param {string} text
+ */
+function hasUsefulBase64Blob(text) {
+  const re = /(?:^|[\s"'`：:：])([A-Za-z0-9+/]{40,}={0,2})(?=$|[\s"'`])/g
+  let m
+  while ((m = re.exec(text)) !== null) {
+    const token = m[1]
+    if (token.startsWith('sk-') || token.startsWith('http')) continue
+    try {
+      const decoded = base64Decode(token).trim()
+      if (!decoded || decoded.length < 8) continue
+      const ascii = decoded.replace(/[^\x20-\x7E]/g, '').replace(/\s+/g, '')
+      if (/^(sk-ant-|sk-|g2a_)/i.test(ascii) && ascii.length >= 8 && ascii.length <= 512) {
+        return true
+      }
+      if (
+        /[{=\n:]/.test(decoded) &&
+        (/https?:\/\//.test(decoded) || /API|KEY|BASE|endpoint|baseUrl/i.test(decoded))
+      ) {
+        return true
+      }
+    } catch {
+      /* ignore */
+    }
+  }
   return false
 }
 

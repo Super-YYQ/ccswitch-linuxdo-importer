@@ -364,11 +364,13 @@
 
     const conf = Math.round((result.confidence || 0) * 100)
     const modelCount = currentModelInfo?.models?.length || 0
+    const ver =
+      typeof SCRIPT_VERSION !== 'undefined' && SCRIPT_VERSION ? String(SCRIPT_VERSION) : 'dev'
     shadow.getElementById('meta').textContent =
       `识别：${result.source} · 置信度 ${conf}%` +
       (result.candidateCount > 1 ? ` · 候选×${result.candidateCount}` : '') +
       (modelCount ? ` · 模型×${modelCount}` : '') +
-      ' · v1.0.5'
+      ` · v${ver}`
 
     const modelLine = currentModelInfo?.model
       ? escapeHtml(currentModelInfo.model) +

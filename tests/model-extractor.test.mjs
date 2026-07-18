@@ -46,6 +46,11 @@ describe('extractModels', () => {
     assert.equal(r.model, 'grok-4.5')
   })
 
+  it('does not match Grok as substring of unrelated tokens', () => {
+    assert.equal(extractModels('mygrok4.5x is not a model id').models.length, 0)
+    assert.equal(extractModels('grok4.50 typo version').models.length, 0)
+  })
+
   it('handles "支持所有模型" gracefully', () => {
     const text = `支持所有模型，无限制`
     const result = extractModels(text)

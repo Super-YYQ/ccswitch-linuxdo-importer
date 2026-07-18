@@ -1,5 +1,6 @@
 /**
  * Bundle core + model-extractor + ui-main into a single Tampermonkey userscript.
+ * Version is read from package.json so header / UI stay in sync.
  */
 import fs from 'node:fs'
 import path from 'node:path'
@@ -12,6 +13,12 @@ const corePath = path.join(root, 'userscript/lib/core.mjs')
 const modelPath = path.join(root, 'userscript/lib/model-extractor.mjs')
 const uiPath = path.join(root, 'userscript/ui-main.js')
 const outPath = path.join(root, 'userscript/ccswitch-linuxdo-importer.user.js')
+const pkgPath = path.join(root, 'package.json')
+
+const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'))
+const version = String(pkg.version || '0.0.0')
+const rawBase =
+  'https://raw.githubusercontent.com/Super-YYQ/ccswitch-linuxdo-importer/main/userscript/ccswitch-linuxdo-importer.user.js'
 
 function stripExports(src) {
   return src
@@ -27,7 +34,7 @@ const ui = fs.readFileSync(uiPath, 'utf8')
 const header = `// ==UserScript==
 // @name         CC Switch Importer for linux.do
 // @namespace    https://github.com/Super-YYQ/ccswitch-linuxdo-importer
-// @version      1.0.5
+// @version      ${version}
 // @description  选中 linux.do 分享文本，一键导入 CC Switch（Claude Code / Codex，自动识别模型）
 // @author       CC Switch Importer Contributors
 // @match        https://linux.do/*
@@ -39,6 +46,8 @@ const header = `// ==UserScript==
 // @license      MIT
 // @homepageURL  https://github.com/Super-YYQ/ccswitch-linuxdo-importer
 // @supportURL   https://github.com/Super-YYQ/ccswitch-linuxdo-importer/issues
+// @downloadURL  ${rawBase}
+// @updateURL    ${rawBase}
 // ==/UserScript==
 
 /* eslint-disable */
@@ -48,6 +57,8 @@ const header = `// ==UserScript==
 const body = `
 ;(function (global) {
   'use strict';
+
+  const SCRIPT_VERSION = ${JSON.stringify(version)};
 
   // ─── core (parse / classify / deeplink) ───
 ${core}
@@ -64,4 +75,4 @@ ${ui}
 `
 
 fs.writeFileSync(outPath, header + body, 'utf8')
-console.log('Wrote', outPath)
+console.log('Wrote', outPath, `(v${version})`)

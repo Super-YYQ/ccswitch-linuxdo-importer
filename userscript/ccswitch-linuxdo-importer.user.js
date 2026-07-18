@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         CC Switch Importer for linux.do
 // @namespace    https://github.com/Super-YYQ/ccswitch-linuxdo-importer
-// @version      1.0.5
+// @version      1.0.6
 // @description  选中 linux.do 分享文本，一键导入 CC Switch（Claude Code / Codex，自动识别模型）
 // @author       CC Switch Importer Contributors
 // @match        https://linux.do/*
@@ -13,6 +13,8 @@
 // @license      MIT
 // @homepageURL  https://github.com/Super-YYQ/ccswitch-linuxdo-importer
 // @supportURL   https://github.com/Super-YYQ/ccswitch-linuxdo-importer/issues
+// @downloadURL  https://raw.githubusercontent.com/Super-YYQ/ccswitch-linuxdo-importer/main/userscript/ccswitch-linuxdo-importer.user.js
+// @updateURL    https://raw.githubusercontent.com/Super-YYQ/ccswitch-linuxdo-importer/main/userscript/ccswitch-linuxdo-importer.user.js
 // ==/UserScript==
 
 /* eslint-disable */
@@ -20,6 +22,8 @@
 
 ;(function (global) {
   'use strict';
+
+  const SCRIPT_VERSION = "1.0.6";
 
   // ─── core (parse / classify / deeplink) ───
 /**
@@ -290,7 +294,7 @@ function repairBrokenBase64(text) {
   return out
 }
 
-/** Final pass: ensure apiKey is decoded and cleaned. */
+/** Final pass: ensure apiKey is decoded/cleaned and confidence stays in [0, 1]. */
 function finalizeResult(result) {
   if (!result) return null
   if (result.apiKey) {
@@ -298,6 +302,9 @@ function finalizeResult(result) {
   }
   if (result.endpoint) {
     result.endpoint = cleanUrl(normalizeShareText(result.endpoint))
+  }
+  if (typeof result.confidence === 'number') {
+    result.confidence = Math.min(1, Math.max(0, result.confidence))
   }
   return result
 }
@@ -323,9 +330,40 @@ function looksLikeConfig(text) {
   }
   // url + base64-ish token (key often base64-encoded on linux.do)
   if (/https?:\/\//i.test(t) && /[A-Za-z0-9+/]{32,}={0,2}/.test(t)) return true
-  // base64 blob (allow fullwidth punctuation around it)
-  if (/(?:^|[\s"'`：:：])[A-Za-z0-9+/]{40,}={0,2}(?:$|[\s"'`])/.test(t)) return true
+  // standalone base64 only if it decodes to a key or config-shaped text (avoid AAAA… noise)
+  if (hasUsefulBase64Blob(t)) return true
   if (/\{[\s\S]*"(?:apiKey|api_key|baseUrl|endpoint|base_url)"[\s\S]*\}/.test(t)) return true
+  return false
+}
+
+/**
+ * True when a base64-ish token decodes to an API key or config-like payload.
+ * Prevents long random A-Z runs from lighting the import button.
+ * @param {string} text
+ */
+function hasUsefulBase64Blob(text) {
+  const re = /(?:^|[\s"'`：:：])([A-Za-z0-9+/]{40,}={0,2})(?=$|[\s"'`])/g
+  let m
+  while ((m = re.exec(text)) !== null) {
+    const token = m[1]
+    if (token.startsWith('sk-') || token.startsWith('http')) continue
+    try {
+      const decoded = base64Decode(token).trim()
+      if (!decoded || decoded.length < 8) continue
+      const ascii = decoded.replace(/[^\x20-\x7E]/g, '').replace(/\s+/g, '')
+      if (/^(sk-ant-|sk-|g2a_)/i.test(ascii) && ascii.length >= 8 && ascii.length <= 512) {
+        return true
+      }
+      if (
+        /[{=\n:]/.test(decoded) &&
+        (/https?:\/\//.test(decoded) || /API|KEY|BASE|endpoint|baseUrl/i.test(decoded))
+      ) {
+        return true
+      }
+    } catch {
+      /* ignore */
+    }
+  }
   return false
 }
 
@@ -1296,14 +1334,15 @@ const MODEL_PATTERNS = {
     /o3(?:-mini)?/gi,
     /o1(?:-mini|-preview)?/gi,
   ],
-  // Grok — accept "Grok4.5" / "grok4.5" (no hyphen) common on linux.do titles
+  // Grok — accept "Grok4.5" / "grok4.5" (no hyphen) common on linux.do titles.
+  // Boundaries avoid false hits like mygrok4.5x / grok4.50
   grok: [
-    /grok[-_]?4\.5/gi,
-    /grok[-_]?3\.5/gi,
-    /grok[-_]?4(?!\.\d)/gi,
-    /grok[-_]?3(?!\.\d)/gi,
-    /grok-beta/gi,
-    /\bgrok-2\b/gi,
+    /(?<![a-z0-9])grok[-_]?4\.5(?![0-9])/gi,
+    /(?<![a-z0-9])grok[-_]?3\.5(?![0-9])/gi,
+    /(?<![a-z0-9])grok[-_]?4(?![0-9.])/gi,
+    /(?<![a-z0-9])grok[-_]?3(?![0-9.])/gi,
+    /(?<![a-z0-9])grok-beta\b/gi,
+    /(?<![a-z0-9])grok-2\b/gi,
   ],
   // Gemini
   gemini: [
@@ -1770,11 +1809,13 @@ function filterModelsForApp(models, app) {
 
     const conf = Math.round((result.confidence || 0) * 100)
     const modelCount = currentModelInfo?.models?.length || 0
+    const ver =
+      typeof SCRIPT_VERSION !== 'undefined' && SCRIPT_VERSION ? String(SCRIPT_VERSION) : 'dev'
     shadow.getElementById('meta').textContent =
       `识别：${result.source} · 置信度 ${conf}%` +
       (result.candidateCount > 1 ? ` · 候选×${result.candidateCount}` : '') +
       (modelCount ? ` · 模型×${modelCount}` : '') +
-      ' · v1.0.5'
+      ` · v${ver}`
 
     const modelLine = currentModelInfo?.model
       ? escapeHtml(currentModelInfo.model) +

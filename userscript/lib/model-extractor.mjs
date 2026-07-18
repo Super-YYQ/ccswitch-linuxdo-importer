@@ -43,14 +43,15 @@ const MODEL_PATTERNS = {
     /o3(?:-mini)?/gi,
     /o1(?:-mini|-preview)?/gi,
   ],
-  // Grok — accept "Grok4.5" / "grok4.5" (no hyphen) common on linux.do titles
+  // Grok — accept "Grok4.5" / "grok4.5" (no hyphen) common on linux.do titles.
+  // Boundaries avoid false hits like mygrok4.5x / grok4.50
   grok: [
-    /grok[-_]?4\.5/gi,
-    /grok[-_]?3\.5/gi,
-    /grok[-_]?4(?!\.\d)/gi,
-    /grok[-_]?3(?!\.\d)/gi,
-    /grok-beta/gi,
-    /\bgrok-2\b/gi,
+    /(?<![a-z0-9])grok[-_]?4\.5(?![0-9])/gi,
+    /(?<![a-z0-9])grok[-_]?3\.5(?![0-9])/gi,
+    /(?<![a-z0-9])grok[-_]?4(?![0-9.])/gi,
+    /(?<![a-z0-9])grok[-_]?3(?![0-9.])/gi,
+    /(?<![a-z0-9])grok-beta\b/gi,
+    /(?<![a-z0-9])grok-2\b/gi,
   ],
   // Gemini
   gemini: [
