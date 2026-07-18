@@ -87,7 +87,7 @@ export function parseShareText(text) {
   const toml = tryParseTomlLike(cleaned)
   const env = tryParseEnv(cleaned)
   const mixed = tryParseMixed(cleaned)
-  return finalizeResult(mergeParseResults([b64, json, toml, env, mixed]))
+  return finalizeResult(mergeParseResults([b64, json, toml, env, mixed]), cleaned)
 }
 
 /**
@@ -308,19 +308,109 @@ export function repairBrokenBase64(text) {
   return out
 }
 
-/** Final pass: ensure apiKey is decoded/cleaned and confidence stays in [0, 1]. */
-function finalizeResult(result) {
+/**
+ * Final pass: decode/clean keys, apply prefix hints from share text, clamp confidence.
+ * @param {ParseResult|null} result
+ * @param {string} [text] - original share text (for "别忘了 sk- 前缀" style hints)
+ */
+function finalizeResult(result, text = '') {
   if (!result) return null
-  if (result.apiKey) {
-    result.apiKey = maybeDecodeKey(normalizeShareText(result.apiKey))
+
+  const fixKey = (k) => {
+    if (!k) return k
+    const decoded = maybeDecodeKey(normalizeShareText(k))
+    return applyKeyPrefixHints(decoded, text)
   }
+
+  const beforeKey = result.apiKey
+  if (result.apiKey) result.apiKey = fixKey(result.apiKey)
   if (result.endpoint) {
     result.endpoint = cleanUrl(normalizeShareText(result.endpoint))
   }
+
+  if (result.candidates && result.candidates.length) {
+    result.candidates = result.candidates.map((c) => ({
+      endpoint: c.endpoint ? cleanUrl(normalizeShareText(c.endpoint)) : c.endpoint,
+      apiKey: c.apiKey ? fixKey(c.apiKey) : c.apiKey,
+    }))
+    const i = Math.max(0, Math.min(result.candidateIndex || 0, result.candidates.length - 1))
+    result.candidateIndex = i
+    result.apiKey = result.candidates[i].apiKey
+    result.endpoint = result.candidates[i].endpoint
+  }
+
+  // Soft note when we prepended a missing vendor prefix from prose hints
+  if (result.apiKey && beforeKey) {
+    const decodedOnly = maybeDecodeKey(normalizeShareText(beforeKey))
+    if (
+      decodedOnly &&
+      result.apiKey !== decodedOnly &&
+      /^(sk-ant-|sk-|g2a_)/i.test(result.apiKey) &&
+      !/^(sk-ant-|sk-|g2a_)/i.test(decodedOnly)
+    ) {
+      const prefix = (result.apiKey.match(/^(sk-ant-|sk-|g2a_)/i) || [])[1] || 'sk-'
+      const note = `已根据文案补上 ${prefix} 前缀`
+      if (!result.warnings) result.warnings = []
+      if (!result.warnings.includes(note)) result.warnings.push(note)
+    }
+  }
+
   if (typeof result.confidence === 'number') {
     result.confidence = Math.min(1, Math.max(0, result.confidence))
   }
   return result
+}
+
+/**
+ * Detect "别忘了 sk- 前缀" / "prefix: sk-ant-" style instructions in share text.
+ * @param {string} text
+ * @returns {'sk-ant-'|'sk-'|'g2a_'|null}
+ */
+export function detectKeyPrefixHint(text) {
+  const t = String(text || '')
+  if (!t) return null
+  // More specific prefixes first
+  if (
+    /sk-ant-[\s_-]*前缀|前缀[\s\S]{0,10}sk-ant-|prefix[\s:：=]*sk-ant-|(?:加|补|带|加上|补上)[\s\S]{0,8}sk-ant-/i.test(
+      t,
+    )
+  ) {
+    return 'sk-ant-'
+  }
+  if (/g2a_[\s_-]*前缀|前缀[\s\S]{0,10}g2a_|prefix[\s:：=]*g2a_/i.test(t)) {
+    return 'g2a_'
+  }
+  // "别忘了 sk- 前缀哦" / "记得加 sk-" / "prefix sk-"
+  if (
+    /(?:别忘了|记得|需要|请|务必|别漏)[\s\S]{0,20}sk-[\s_-]*前缀|sk-[\s_-]*前缀|前缀[\s\S]{0,10}sk-(?!ant)|prefix[\s:：=]*sk-(?!ant)|(?:加|补|带|加上|补上)[\s\S]{0,6}sk-(?!ant)/i.test(
+      t,
+    )
+  ) {
+    return 'sk-'
+  }
+  return null
+}
+
+/**
+ * Prepend vendor prefix when share text instructs to, and key body has none.
+ * @param {string} key
+ * @param {string} text
+ * @returns {string}
+ */
+export function applyKeyPrefixHints(key, text) {
+  if (!key) return key
+  let k = String(key).trim()
+  if (!k) return k
+  if (/^(sk-ant-|sk-|g2a_|Bearer\s)/i.test(k)) {
+    return sanitizeApiKey(k.replace(/^Bearer\s*/i, ''))
+  }
+  const prefix = detectKeyPrefixHint(text)
+  if (!prefix) return k
+  // only for bare token bodies (not URLs / prose)
+  if (k.length < 8 || k.length > 512) return k
+  if (!/^[A-Za-z0-9_+\-./]+$/.test(k)) return k
+  if (/^https?:\/\//i.test(k)) return k
+  return prefix + k
 }
 
 /**
@@ -1279,8 +1369,9 @@ function extractLabeledFields(text) {
 }
 
 /**
- * If value is base64 that decodes to a printable API token, return decoded; else original.
+ * If value is base64/hex that decodes to a printable API token, return decoded; else original.
  * Also strips common linux.do anti-scrape watermarks (CJK like \u300C\u53BB\u9664\u6587\u4E2D\u300D) injected into keys.
+ * Does not apply vendor prefix hints \u2014 that is done in finalizeResult via applyKeyPrefixHints.
  */
 function maybeDecodeKey(value) {
   if (!value) return value
@@ -1293,24 +1384,26 @@ function maybeDecodeKey(value) {
   if (/^(sk-ant-|sk-|g2a_|Bearer\s*)/i.test(v)) {
     return sanitizeApiKey(v.replace(/^Bearer\s*/i, ''))
   }
+
+  // hex-encoded key body or full key (even length, long enough)
+  if (/^[0-9a-fA-F]{24,}$/.test(v) && v.length % 2 === 0) {
+    try {
+      const decoded = sanitizeApiKey(hexDecode(v).trim())
+      if (isDecodableKeyBody(decoded) && (hasKeyPrefix(decoded) || decoded.length < v.length)) {
+        return decoded
+      }
+    } catch {
+      /* try base64 next */
+    }
+  }
+
   // base64-ish (charset, often ends with =)
   if (!/^[A-Za-z0-9+/_-]+={0,2}$/.test(v) || v.length < 16) return v
   try {
     const decoded = sanitizeApiKey(base64Decode(v).trim())
-    // decoded should look like a token: printable ASCII, no spaces, reasonable length
-    if (
-      decoded.length >= 8 &&
-      decoded.length <= 512 &&
-      /^[\x20-\x7E]+$/.test(decoded) &&
-      !/\s/.test(decoded) &&
-      /[A-Za-z0-9]/.test(decoded)
-    ) {
+    if (isDecodableKeyBody(decoded)) {
       // prefer decoded when it looks more like a key than the raw b64
-      if (
-        /^(sk-ant-|sk-|g2a_)/i.test(decoded) ||
-        decoded.includes('_') ||
-        decoded.length < v.length
-      ) {
+      if (hasKeyPrefix(decoded) || decoded.includes('_') || decoded.length < v.length) {
         return decoded
       }
     }
@@ -1318,6 +1411,40 @@ function maybeDecodeKey(value) {
     /* keep original */
   }
   return v
+}
+
+function hasKeyPrefix(s) {
+  return /^(sk-ant-|sk-|g2a_)/i.test(s)
+}
+
+/** Printable token-like body after decode (with or without vendor prefix). */
+function isDecodableKeyBody(decoded) {
+  return (
+    !!decoded &&
+    decoded.length >= 8 &&
+    decoded.length <= 512 &&
+    /^[\x20-\x7E]+$/.test(decoded) &&
+    !/\s/.test(decoded) &&
+    /[A-Za-z0-9]/.test(decoded)
+  )
+}
+
+function hexDecode(hex) {
+  const h = String(hex).replace(/[^0-9a-fA-F]/g, '')
+  if (h.length % 2 !== 0) throw new Error('bad hex')
+  if (typeof Buffer !== 'undefined') {
+    return Buffer.from(h, 'hex').toString('utf8')
+  }
+  const bytes = new Uint8Array(h.length / 2)
+  for (let i = 0; i < bytes.length; i++) {
+    bytes[i] = parseInt(h.substr(i * 2, 2), 16)
+  }
+  if (typeof TextDecoder !== 'undefined') {
+    return new TextDecoder('utf-8').decode(bytes)
+  }
+  let s = ''
+  for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i])
+  return s
 }
 
 /**

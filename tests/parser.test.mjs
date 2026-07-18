@@ -9,6 +9,8 @@ import {
   base64Encode,
   enrichTextWithAnchorHrefs,
   selectCandidate,
+  detectKeyPrefixHint,
+  applyKeyPrefixHints,
 } from '../userscript/lib/core.mjs'
 
 describe('looksLikeConfig', () => {
@@ -389,6 +391,62 @@ describe('selectCandidate', () => {
     assert.ok(
       ['sk-ant-api03-aaaaaaaaaaaaaaaa', 'sk-ant-api03-bbbbbbbbbbbbbbbb'].includes(second.apiKey),
     )
+  })
+})
+
+describe('key prefix hints + alternate encodings', () => {
+  it('detects 别忘了 sk- 前缀 style hints', () => {
+    assert.equal(detectKeyPrefixHint('别忘了 sk- 前缀哦'), 'sk-')
+    assert.equal(detectKeyPrefixHint('记得加 sk-ant- 前缀'), 'sk-ant-')
+    assert.equal(detectKeyPrefixHint('prefix: sk-'), 'sk-')
+    assert.equal(detectKeyPrefixHint('普通分享没有前缀说明'), null)
+  })
+
+  it('applyKeyPrefixHints only when bare body + hint', () => {
+    assert.equal(applyKeyPrefixHints('AbCdEfGhIjKlMnOpQrSt', '别忘了 sk- 前缀'), 'sk-AbCdEfGhIjKlMnOpQrSt')
+    assert.equal(
+      applyKeyPrefixHints('sk-already-prefixed-value', '别忘了 sk- 前缀'),
+      'sk-already-prefixed-value',
+    )
+    assert.equal(applyKeyPrefixHints('AbCdEfGhIjKlMnOpQrSt', '没有提示'), 'AbCdEfGhIjKlMnOpQrSt')
+  })
+
+  it('parses base64 key body and prepends sk- from prose hint (linux.do style)', () => {
+    // synthetic body — not a real secret
+    const body = 'JFkov3xTVxHRhYOGBBuD61tsSYK0Gcf1cZgqlQ3VSHXReuwk'
+    const b64 = base64Encode(body)
+    const text = `模型：grok-4.5
+key（base64）：${b64}
+
+别忘了 sk- 前缀哦
+干啥都行，不做限制喵`
+    assert.equal(looksLikeConfig(text), true)
+    const r = parseShareText(text)
+    assert.ok(r)
+    assert.equal(r.apiKey, `sk-${body}`)
+    assert.ok(r.warnings.some((w) => /前缀/.test(w)))
+  })
+
+  it('parses base64 key body and prepends sk-ant- when that prefix is hinted', () => {
+    const body = 'api03-SYNTHETICBODYONLY1234567890abcd'
+    const b64 = base64Encode(body)
+    const text = `API Key（Base64）
+${b64}
+请加上 sk-ant- 前缀再导入`
+    const r = parseShareText(text)
+    assert.ok(r)
+    assert.equal(r.apiKey, `sk-ant-${body}`)
+  })
+
+  it('decodes hex-encoded sk- key when labeled as key', () => {
+    const full = 'sk-hexonlysyntheticvalue1234567890ab'
+    const hex = Buffer.from(full, 'utf8').toString('hex')
+    const text = `key：${hex}
+url：https://hex.example.com`
+    const r = parseShareText(text)
+    assert.ok(r)
+    assert.equal(r.apiKey, full)
+    assert.equal(r.endpoint, 'https://hex.example.com')
   })
 })
 
