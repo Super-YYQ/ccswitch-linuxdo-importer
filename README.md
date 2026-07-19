@@ -41,7 +41,7 @@
    - 或从 [GitHub Releases](https://github.com/Super-YYQ/ccswitch-linuxdo-importer/releases) 下载对应版本的 `.user.js`
 4. 访问 https://linux.do ，在帖子中选中一段配置文字
 
-确认安装版本：打开确认卡后，元信息末尾应显示当前发布版本（例如 **v1.2.1**）。
+确认安装版本：打开确认卡后，元信息末尾应显示当前发布版本（例如 **v1.2.2**）。
 
 > 若你之前从 `main` 安装过旧版：请卸载后按上面的 `release` 链接重装一次，否则自动更新仍会指向已废弃的 main 产物路径。
 
@@ -156,9 +156,10 @@ git push origin v1.2.0
 ```
 
 4. GitHub Action `Release`（`.github/workflows/release.yml`）会：
-   - 跑测试并 `npm run build`
-   - 校验 tag 与 `package.json` 版本一致（`v1.2.0` ↔ `1.2.0`）
-   - 把产物推到 `release` 分支
+   - 跑测试并 `npm run build`（只读权限 Job）
+   - 校验 tag 与 `package.json` 版本一致（`v1.2.2` ↔ `1.2.2`），且 tag 提交在 `main` 上
+   - 用 `semver` 比较版本；同版本仅当产物 **SHA-256 完全一致** 才允许重跑，内容不同则拒绝并要求升号
+   - 把产物推到 `release` 分支（写权限 Job）
    - 创建 GitHub Release，附上 `.user.js` 附件
 
 CI（`main` / PR）只做 test + build，**不会**更新 `release` 分支。
@@ -176,6 +177,7 @@ CI（`main` / PR）只做 test + build，**不会**更新 `release` 分支。
 
 ## 变更摘要
 
+- **v1.2.2** — 发布守卫：同版本比 SHA-256（内容不同拒绝）；版本比较改用 `semver`（支持预发布号）
 - **v1.2.1** — bug333 审查：Release 拆 build/publish 最小权限；并发与版本降级保护；深链长度上限；多深链/无 `//` 提取；错误卡清理；高风险配置默认不勾选；env 字段摘要；TextEncoder 字节数
 - **v1.2.0** — 发布链路加固：esbuild IIFE 替代正则剥 export；`@updateURL`/`@downloadURL` 指向 `release` 分支；main 仅源码；打 `v*` tag 才发布
 - **v1.1.7** — 确定性测试密钥；确认卡披露完整 config + 可取消携带；非 provider 深链不亮按钮；URL/Key 按行邻近配对；CI Node 18/20/22

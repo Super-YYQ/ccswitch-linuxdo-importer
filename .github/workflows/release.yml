@@ -92,6 +92,14 @@ jobs:
           name: userscript
           path: userscript
 
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 20
+
+      # Needed for scripts/release-guard.mjs (semver + sha256 compare). No tests run here.
+      - name: Install (release guard only)
+        run: npm ci
+
       - name: Publish userscript to release branch
         env:
           VERSION: ${{ needs.build.outputs.version }}
@@ -101,32 +109,24 @@ jobs:
           ARTIFACT="userscript/ccswitch-linuxdo-importer.user.js"
           test -f "$ARTIFACT"
 
-          # Refuse to publish a version lower than what release already serves.
+          CURRENT_FILE=""
+          CURRENT_VERSION=""
           if git fetch origin release:refs/remotes/origin/release 2>/dev/null; then
-            CURRENT=$(git show origin/release:userscript/ccswitch-linuxdo-importer.user.js 2>/dev/null \
-              | sed -n 's/^\/\/ @version[[:space:]]*//p' | head -n1 | tr -d '\r' || true)
-            if [ -n "${CURRENT}" ]; then
-              node -e '
-                const cur = process.argv[1];
-                const next = process.argv[2];
-                function parts(v) {
-                  const m = String(v).trim().match(/^(\d+)\.(\d+)\.(\d+)/);
-                  if (!m) throw new Error("bad version: " + v);
-                  return m.slice(1).map(Number);
-                }
-                const a = parts(cur);
-                const b = parts(next);
-                for (let i = 0; i < 3; i++) {
-                  if (b[i] > a[i]) process.exit(0);
-                  if (b[i] < a[i]) {
-                    console.error("Refuse downgrade: release has " + cur + ", refusing " + next);
-                    process.exit(1);
-                  }
-                }
-                // equal → allow (idempotent republish)
-              ' "$CURRENT" "$VERSION"
+            CURRENT_FILE=$(mktemp)
+            if git show origin/release:userscript/ccswitch-linuxdo-importer.user.js >"$CURRENT_FILE" 2>/dev/null; then
+              CURRENT_VERSION=$(sed -n 's/^\/\/ @version[[:space:]]*//p' "$CURRENT_FILE" | head -n1 | tr -d '\r')
+            else
+              rm -f "$CURRENT_FILE"
+              CURRENT_FILE=""
             fi
           fi
+
+          if [ -n "${CURRENT_FILE}" ]; then
+            node scripts/release-guard.mjs "$CURRENT_VERSION" "$VERSION" "$CURRENT_FILE" "$ARTIFACT"
+          else
+            node scripts/release-guard.mjs "" "$VERSION" - "$ARTIFACT"
+          fi
+          rm -f "${CURRENT_FILE:-}"
 
           WORKDIR=$(mktemp -d)
           if git show-ref --verify --quiet refs/remotes/origin/release; then
