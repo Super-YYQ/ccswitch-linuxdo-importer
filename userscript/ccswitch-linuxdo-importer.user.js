@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         CC Switch Importer for linux.do
 // @namespace    https://github.com/Super-YYQ/ccswitch-linuxdo-importer
-// @version      1.2.3
+// @version      1.2.4
 // @description  选中 linux.do 分享文本，一键导入 CC Switch（Claude Code / Codex，自动识别模型）
 // @author       CC Switch Importer Contributors
 // @match        https://linux.do/*
@@ -53,6 +53,7 @@
     "TOKEN"
   ];
   var URL_RE = /https?:\/\/[^\s"'`<>，。；、）)\]}]+/gi;
+  var BARE_HOST_RE = /(?<!@)\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:com|net|org|io|dev|app|ai|cc|me|co|info|xyz|top|tech|cloud|run|site|online|pro|page|link|live|tv|us|uk|cn|jp|de|fr|ru|br|in|au|ca|nl|se|no|fi|pl|cz|ch|at|be|es|it|pt|kr|tw|hk|sg|my|id|ph|vn|th|edu|gov)(?:\/[^\s"'`<>，。；、）)\]}]*)?/gi;
   var SK_ANT_RE = /sk-ant-[A-Za-z0-9_\-]{10,}/g;
   var SK_RE = /sk-[A-Za-z0-9_\-]{16,}/g;
   var BEARER_RE = /Bearer\s+([A-Za-z0-9_\-.]{16,})/gi;
@@ -314,16 +315,53 @@ ${appended.join("\n")}`;
     if (/ANTHROPIC_|OPENAI_|CODEX_|BASE_URL|API_KEY|apiKey|baseUrl|endpoint|Base\s*URL/i.test(t))
       return true;
     if (/sk-ant-|sk-[A-Za-z0-9]{16,}/.test(t)) return true;
+    if (VENDOR_KEY_RE.test(t)) return true;
+    VENDOR_KEY_RE.lastIndex = 0;
     if (/https?:\/\//i.test(t) && /sk-|Bearer\s+/i.test(t)) return true;
+    if (hasBareHost(t) && (/sk-|Bearer\s+/i.test(t) || VENDOR_KEY_RE.test(t))) return true;
+    VENDOR_KEY_RE.lastIndex = 0;
     if (/(?:url|base[_-]?url|base\s*url|endpoint|key|api[_-]?key|api\s*key|token|密钥|地址|接口)/i.test(
       t
     )) {
-      if (/https?:\/\//i.test(t) || /[A-Za-z0-9_+\-/]{16,}/.test(t)) return true;
+      if (/https?:\/\//i.test(t) || hasBareHost(t) || /[A-Za-z0-9_+\-/]{16,}/.test(t)) return true;
     }
     if (/https?:\/\//i.test(t) && /[A-Za-z0-9+/]{32,}={0,2}/.test(t)) return true;
     if (hasUsefulBase64Blob(t)) return true;
     if (/\{[\s\S]*"(?:apiKey|api_key|baseUrl|endpoint|base_url)"[\s\S]*\}/.test(t)) return true;
     return false;
+  }
+  function hasBareHost(text) {
+    BARE_HOST_RE.lastIndex = 0;
+    return BARE_HOST_RE.test(text);
+  }
+  function collectEndpoints(text) {
+    const full = matchAll(text, URL_RE).map(cleanUrl).filter((u) => isHttpUrl(u));
+    const bare = matchAll(text, BARE_HOST_RE).map((h) => normalizeBareHost(h)).filter(Boolean);
+    const covered = /* @__PURE__ */ new Set();
+    for (const u of full) {
+      covered.add(u.toLowerCase());
+      try {
+        covered.add(new URL(u).host.toLowerCase());
+      } catch (e) {
+      }
+    }
+    const bareUrls = [];
+    for (const h of bare) {
+      const hostOnly = h.replace(/^https?:\/\//i, "").split("/")[0].toLowerCase();
+      if (covered.has(h.toLowerCase()) || covered.has(hostOnly)) continue;
+      if (full.some((u) => u.toLowerCase().includes(hostOnly))) continue;
+      bareUrls.push(h);
+      covered.add(hostOnly);
+    }
+    return unique([...full, ...bareUrls]);
+  }
+  function normalizeBareHost(host) {
+    let h = cleanUrl(String(host || ""));
+    if (!h) return null;
+    if (/^[a-z][a-z0-9+.-]*:/i.test(h)) return null;
+    if (h.includes("@")) return null;
+    if (!/^[a-z0-9][a-z0-9.-]*\.[a-z]{2,}(?:\/\S*)?$/i.test(h)) return null;
+    return `https://${h}`;
   }
   function hasUsefulBase64Blob(text) {
     const re = new RegExp(`${B64_BOUNDARY_L}([A-Za-z0-9+/]{40,}={0,2})${B64_BOUNDARY_R}`, "g");
@@ -970,7 +1008,7 @@ ${appended.join("\n")}`;
   function tryParseMixed(text) {
     const labeled = extractLabeledFields(text);
     const urls = unique([
-      ...matchAll(text, URL_RE).map(cleanUrl),
+      ...collectEndpoints(text),
       ...labeled.endpoint ? [labeled.endpoint] : []
     ]).filter((u) => isHttpUrl(u)).slice(0, MAX_URLS);
     const keys = unique([
@@ -1577,7 +1615,7 @@ ${appended.join("\n")}`;
   }
 
   // userscript/ui-main.js
-  var SCRIPT_VERSION = "1.2.3";
+  var SCRIPT_VERSION = "1.2.4";
   var ROOT_ID = "ccs-ld-root";
   var Z = 2147483e3;
   var lastSelectionText = "";
