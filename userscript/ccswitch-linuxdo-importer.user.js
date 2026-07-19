@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         CC Switch Importer for linux.do
 // @namespace    https://github.com/Super-YYQ/ccswitch-linuxdo-importer
-// @version      1.2.1
+// @version      1.2.2
 // @description  选中 linux.do 分享文本，一键导入 CC Switch（Claude Code / Codex，自动识别模型）
 // @author       CC Switch Importer Contributors
 // @match        https://linux.do/*
@@ -1577,7 +1577,7 @@ ${appended.join("\n")}`;
   }
 
   // userscript/ui-main.js
-  var SCRIPT_VERSION = "1.2.1";
+  var SCRIPT_VERSION = "1.2.2";
   var ROOT_ID = "ccs-ld-root";
   var Z = 2147483e3;
   var lastSelectionText = "";
