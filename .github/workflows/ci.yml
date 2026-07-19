@@ -21,11 +21,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
+      - name: Install
+        run: npm ci
       - name: Test
         run: npm test
       - name: Build userscript
         if: matrix.node == 20
         run: npm run build
-      - name: Ensure committed userscript matches build
-        if: matrix.node == 20
-        run: git diff --exit-code -- userscript/ccswitch-linuxdo-importer.user.js

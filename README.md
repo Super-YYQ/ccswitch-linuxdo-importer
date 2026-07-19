@@ -35,12 +35,15 @@
 2. 安装并至少运行过一次 [CC Switch](https://github.com/farion1231/cc-switch/releases)（注册 `ccswitch://`）
 3. 安装用户脚本（任选其一）：
    - **推荐**：打开  
-     [raw 脚本（一键安装）](https://raw.githubusercontent.com/Super-YYQ/ccswitch-linuxdo-importer/main/userscript/ccswitch-linuxdo-importer.user.js)  
-     由 Tampermonkey 捕获并安装
-   - 或复制 [`userscript/ccswitch-linuxdo-importer.user.js`](./userscript/ccswitch-linuxdo-importer.user.js) 全文到「添加新脚本」
+     [raw 脚本（一键安装）](https://raw.githubusercontent.com/Super-YYQ/ccswitch-linuxdo-importer/release/userscript/ccswitch-linuxdo-importer.user.js)  
+     由 Tampermonkey 捕获并安装  
+     （安装地址固定指向 **`release` 分支**；`main` 只放源码，推送 main **不会**自动给用户发版）
+   - 或从 [GitHub Releases](https://github.com/Super-YYQ/ccswitch-linuxdo-importer/releases) 下载对应版本的 `.user.js`
 4. 访问 https://linux.do ，在帖子中选中一段配置文字
 
-确认安装版本：打开确认卡后，元信息末尾应显示当前 `package.json` 版本（例如 **v1.1.7**）。
+确认安装版本：打开确认卡后，元信息末尾应显示当前发布版本（例如 **v1.2.0**）。
+
+> 若你之前从 `main` 安装过旧版：请卸载后按上面的 `release` 链接重装一次，否则自动更新仍会指向已废弃的 main 产物路径。
 
 ---
 
@@ -107,26 +110,58 @@ key：ZzJhX...==
 ## 开发
 
 ```bash
+# 安装依赖（esbuild 等）
+npm ci
+
 # 单元测试
 npm test
 
-# 从 lib + UI 重新打包油猴单文件
+# 用 esbuild 将 ESM 源码打包为油猴 IIFE 单文件（本地产物，不提交到 main）
 npm run build
 
-# 测试 + 构建 + 校验提交的 .user.js 与构建产物一致（CI 同逻辑）
+# 测试 + 构建
 npm run check
 ```
 
 | 路径 | 说明 |
 |------|------|
-| `userscript/lib/core.mjs` | 配置解析 / 分类 / 深链 |
+| `userscript/lib/core.mjs` | 配置解析 / 分类 / 深链（Node 测试直接 import） |
 | `userscript/lib/model-extractor.mjs` | 模型名提取 |
-| `userscript/ui-main.js` | 选区 / 确认卡 / 唤起 |
-| `userscript/ccswitch-linuxdo-importer.user.js` | **安装用产物**（`npm run build` 生成） |
+| `userscript/ui-main.js` | 选区 / 确认卡 / 唤起（esbuild 入口，ESM） |
+| `userscript/ccswitch-linuxdo-importer.user.js` | **构建产物**（gitignore；仅 `release` 分支 / Release 资产） |
+| `scripts/build.mjs` | esbuild IIFE + userscript 头（`@updateURL` → `release`） |
 | `tests/*.test.mjs` | 单测 |
 | `docs/superpowers/` | 设计与计划 |
 
-修改源码后务必 `npm run build`，再在 Tampermonkey 中更新脚本。
+本地验证：`npm run build` 后把生成的 `.user.js` 粘进 Tampermonkey，或用「从磁盘安装」。
+
+### 发布流程
+
+分支职责：
+
+| 分支 | 内容 |
+|------|------|
+| `main` | 源码、测试、构建脚本；**不含**安装用 `.user.js` |
+| `release` | 稳定油猴脚本（Tampermonkey `@updateURL` / `@downloadURL` 目标） |
+
+发版步骤：
+
+1. 在 `main` 改完功能，`npm test` / `npm run build` 通过
+2. 把 `package.json` 版本号改成要发布的版本（如 `1.2.0`）
+3. 合并到 `main` 后打 tag 并推送 tag（**不要**只靠推 main 发版）：
+
+```bash
+git tag v1.2.0
+git push origin v1.2.0
+```
+
+4. GitHub Action `Release`（`.github/workflows/release.yml`）会：
+   - 跑测试并 `npm run build`
+   - 校验 tag 与 `package.json` 版本一致（`v1.2.0` ↔ `1.2.0`）
+   - 把产物推到 `release` 分支
+   - 创建 GitHub Release，附上 `.user.js` 附件
+
+CI（`main` / PR）只做 test + build，**不会**更新 `release` 分支。
 
 ---
 
@@ -141,6 +176,7 @@ npm run check
 
 ## 变更摘要
 
+- **v1.2.0** — 发布链路加固：esbuild IIFE 替代正则剥 export；`@updateURL`/`@downloadURL` 指向 `release` 分支；main 仅源码；打 `v*` tag 才发布
 - **v1.1.7** — 确定性测试密钥；确认卡披露完整 config + 可取消携带；非 provider 深链不亮按钮；URL/Key 按行邻近配对；CI Node 18/20/22
 - **v1.1.6** — 模型最长匹配去重；`filterModelsForApp` 改为排序不删；清理残留测试密钥；历史 `filter-repo` 脱敏
 - **v1.1.5** — 审查加固：拒绝非 provider 深链；简单 JSON 不再整包 config；解析大小/候选预算；测试夹具改为合成密钥且日志脱敏

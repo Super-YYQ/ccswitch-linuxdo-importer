@@ -1,16 +1,19 @@
 {
   "name": "ccswitch-linuxdo-importer",
-  "version": "1.1.7",
+  "version": "1.2.0",
   "private": true,
   "description": "Tampermonkey userscript: select API share text on linux.do and open CC Switch import deeplink (with model auto-detect)",
   "type": "module",
   "scripts": {
     "test": "node --test tests/parser.test.mjs tests/model-extractor.test.mjs && node tests/variants-check.mjs",
     "build": "node scripts/build.mjs",
-    "check": "npm test && npm run build && git diff --exit-code -- userscript/ccswitch-linuxdo-importer.user.js"
+    "check": "npm test && npm run build"
   },
   "engines": {
     "node": ">=18"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "devDependencies": {
+    "esbuild": "^0.25.12"
+  }
 }

@@ -1,0 +1,90 @@
+name: Release
+
+# Publish the Tampermonkey userscript only when a version tag is pushed.
+# main holds source; the `release` branch holds the stable install artifact.
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install
+        run: npm ci
+
+      - name: Test
+        run: npm test
+
+      - name: Build userscript
+        run: npm run build
+
+      - name: Read package version
+        id: pkg
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          TAG="${GITHUB_REF_NAME}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          if [ "${TAG}" != "v${VERSION}" ]; then
+            echo "Tag ${TAG} does not match package.json version v${VERSION}"
+            exit 1
+          fi
+
+      - name: Publish userscript to release branch
+        run: |
+          set -euo pipefail
+          ARTIFACT="userscript/ccswitch-linuxdo-importer.user.js"
+          test -f "$ARTIFACT"
+          WORKDIR=$(mktemp -d)
+          if git fetch origin release:refs/remotes/origin/release 2>/dev/null; then
+            git worktree add "$WORKDIR" origin/release
+          else
+            git worktree add --detach "$WORKDIR"
+            git -C "$WORKDIR" checkout --orphan release
+            git -C "$WORKDIR" rm -rf . >/dev/null 2>&1 || true
+          fi
+          mkdir -p "$WORKDIR/userscript"
+          cp "$ARTIFACT" "$WORKDIR/userscript/ccswitch-linuxdo-importer.user.js"
+          {
+            echo '# CC Switch Importer — release artifacts'
+            echo
+            echo 'Stable Tampermonkey install target. Do not develop here.'
+            echo
+            echo '- Install: [ccswitch-linuxdo-importer.user.js](./userscript/ccswitch-linuxdo-importer.user.js)'
+            echo '- Source: https://github.com/Super-YYQ/ccswitch-linuxdo-importer (main)'
+            echo "- Version: ${{ steps.pkg.outputs.version }}"
+            echo "- Tag: ${{ steps.pkg.outputs.tag }}"
+          } > "$WORKDIR/README.md"
+          git -C "$WORKDIR" config user.name "github-actions[bot]"
+          git -C "$WORKDIR" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C "$WORKDIR" add -A
+          if git -C "$WORKDIR" diff --cached --quiet; then
+            echo "No userscript changes to publish"
+          else
+            git -C "$WORKDIR" commit -m "release: userscript v${{ steps.pkg.outputs.version }}"
+            git -C "$WORKDIR" push origin HEAD:release
+          fi
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.pkg.outputs.tag }}
+          name: v${{ steps.pkg.outputs.version }}
+          generate_release_notes: true
+          files: userscript/ccswitch-linuxdo-importer.user.js
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

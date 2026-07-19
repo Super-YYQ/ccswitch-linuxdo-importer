@@ -7,3 +7,6 @@ Thumbs.db
 .vscode/
 *.swp
 .claude/
+# Built userscript lives on the `release` branch only (tag-triggered publish).
+userscript/ccswitch-linuxdo-importer.user.js
+
