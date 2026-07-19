@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         CC Switch Importer for linux.do
 // @namespace    https://github.com/Super-YYQ/ccswitch-linuxdo-importer
-// @version      1.2.0
+// @version      1.2.1
 // @description  选中 linux.do 分享文本，一键导入 CC Switch（Claude Code / Codex，自动识别模型）
 // @author       CC Switch Importer Contributors
 // @match        https://linux.do/*
@@ -59,7 +59,7 @@
   var B64_BOUNDARY_L = "(?:^|[\\s\"'`\uFF1A:\uFF0C\u3002\uFF1B\u3001\uFF01\uFF1F]|(?<=[\u4E00-\u9FFF]))";
   var B64_BOUNDARY_R = "(?:$|[\\s\"'`\uFF0C\u3002\uFF1B\u3001\uFF01\uFF1F]|(?=[\u4E00-\u9FFF]))";
   var BASE64_RE = new RegExp(`${B64_BOUNDARY_L}([A-Za-z0-9+/]{40,}={0,2})${B64_BOUNDARY_R}`, "g");
-  var DEEPLINK_RE = /ccswitch:\/\/[^\s"'`<>]+/i;
+  var DEEPLINK_RE = /ccswitch:(?:\/\/)?[^\s"'`<>]+/gi;
   var KEY_PREFIX_RE = /^(sk-ant-|sk-|g2a_|tp-|nk-|pk-|rk-)/i;
   var KEY_PREFIX_BODY_RE = /^(sk-ant-|sk-|g2a_|tp-|nk-|pk-|rk-|Bearer\s)/i;
   var VENDOR_KEY_RE = /\b(?:g2a_|tp-|nk-|pk-|rk-)[A-Za-z0-9_\-]{8,}\b/g;
@@ -70,8 +70,8 @@
     const oversized = raw.length > MAX_SELECTION_LEN;
     if (oversized) raw = raw.slice(0, MAX_SELECTION_LEN);
     let cleaned = repairBrokenBase64(stripMarkdownFences(raw));
-    const deep = extractDeeplink(cleaned);
-    if (deep) {
+    const deeplinks = extractDeeplinks(cleaned);
+    for (const deep of deeplinks) {
       const fromLink = parseDeeplink(deep);
       if (fromLink) {
         fromLink.deeplink = deep;
@@ -80,8 +80,8 @@
         }
         return fromLink;
       }
-      cleaned = cleaned.split(deep).join(" ");
     }
+    if (deeplinks.length) cleaned = stripAllDeeplinks(cleaned);
     const b64 = tryParseBase64(cleaned);
     const json = tryParseJson(cleaned);
     const toml = tryParseTomlLike(cleaned);
@@ -308,8 +308,9 @@ ${appended.join("\n")}`;
     if (!text || text.trim().length < MIN_SELECTION_LEN) return false;
     let t = repairBrokenBase64(normalizeShareText(text));
     if (t.length > MAX_SELECTION_LEN) t = t.slice(0, MAX_SELECTION_LEN);
-    const deep = extractDeeplink(t);
-    if (deep) return Boolean(parseDeeplink(deep));
+    const deeplinks = extractDeeplinks(t);
+    if (deeplinks.some((d) => Boolean(parseDeeplink(d)))) return true;
+    if (deeplinks.length) t = stripAllDeeplinks(t);
     if (/ANTHROPIC_|OPENAI_|CODEX_|BASE_URL|API_KEY|apiKey|baseUrl|endpoint|Base\s*URL/i.test(t))
       return true;
     if (/sk-ant-|sk-[A-Za-z0-9]{16,}/.test(t)) return true;
@@ -345,6 +346,7 @@ ${appended.join("\n")}`;
     }
     return false;
   }
+  var MAX_DEEPLINK_LEN = 8e3;
   function buildDeeplink(result, appOverride, modelInfo, options) {
     const app = appOverride || result.app;
     if (!app) {
@@ -374,17 +376,71 @@ ${appended.join("\n")}`;
   function describeConfigPayload(config) {
     if (!config) return null;
     const raw = String(config);
-    const sizeBytes = typeof Buffer !== "undefined" ? Buffer.byteLength(raw, "utf8") : raw.length;
+    const sizeBytes = typeof TextEncoder !== "undefined" ? new TextEncoder().encode(raw).byteLength : typeof Buffer !== "undefined" ? Buffer.byteLength(raw, "utf8") : raw.length;
     let fields = [];
+    let envFields = [];
+    const riskReasons = [];
     try {
       const obj = JSON.parse(raw);
       if (obj && typeof obj === "object" && !Array.isArray(obj)) {
         fields = Object.keys(obj);
+        if (obj.env && typeof obj.env === "object" && !Array.isArray(obj.env)) {
+          envFields = Object.keys(obj.env);
+        }
+        const riskyNames = fields.filter((k) => isRiskyConfigFieldName(k));
+        if (riskyNames.length) {
+          riskReasons.push(`\u9AD8\u98CE\u9669\u5B57\u6BB5\uFF1A${riskyNames.slice(0, 6).join("\u3001")}`);
+        }
+        const unknown = fields.filter((k) => !isKnownConfigFieldName(k));
+        if (unknown.length >= 4) {
+          riskReasons.push(`\u8F83\u591A\u672A\u77E5\u9644\u52A0\u5B57\u6BB5\uFF08${unknown.length}\uFF09`);
+        }
       }
     } catch (e) {
       fields = [];
     }
-    return { fields, sizeBytes };
+    return {
+      fields,
+      envFields,
+      sizeBytes,
+      risky: riskReasons.length > 0,
+      riskReasons
+    };
+  }
+  var KNOWN_CONFIG_FIELDS = /* @__PURE__ */ new Set([
+    "env",
+    "name",
+    "baseUrl",
+    "base_url",
+    "endpoint",
+    "apiKey",
+    "api_key",
+    "authToken",
+    "auth_token",
+    "model",
+    "models",
+    "websiteUrl",
+    "website_url",
+    "notes",
+    "icon"
+  ]);
+  function isKnownConfigFieldName(name) {
+    return KNOWN_CONFIG_FIELDS.has(String(name || ""));
+  }
+  function isRiskyConfigFieldName(name) {
+    const k = String(name || "");
+    if (/usageScript|usage_script|usageAccessToken|usage_access_token/i.test(k)) return true;
+    if (/script|command|hook|eval|exec/i.test(k)) return true;
+    if (/access.?token|password|secret|private.?key/i.test(k) && !/^api[_-]?key$/i.test(k)) {
+      return true;
+    }
+    return false;
+  }
+  function shouldIncludeFullConfigByDefault(config) {
+    if (!config) return false;
+    const info = describeConfigPayload(config);
+    if (!info) return false;
+    return !info.risky;
   }
   function maskKey(key) {
     if (!key) return "";
@@ -464,9 +520,18 @@ ${appended.join("\n")}`;
       ...partial
     };
   }
-  function extractDeeplink(text) {
-    const m = text.match(DEEPLINK_RE);
-    return m ? m[0] : null;
+  function extractDeeplinks(text) {
+    if (!text) return [];
+    const re = new RegExp(DEEPLINK_RE.source, "gi");
+    const out = [];
+    let m;
+    while ((m = re.exec(text)) !== null) {
+      if (m[0]) out.push(m[0]);
+    }
+    return out;
+  }
+  function stripAllDeeplinks(text) {
+    return String(text || "").replace(new RegExp(DEEPLINK_RE.source, "gi"), " ");
   }
   function parseDeeplink(link) {
     try {
@@ -1512,7 +1577,7 @@ ${appended.join("\n")}`;
   }
 
   // userscript/ui-main.js
-  var SCRIPT_VERSION = "1.2.0";
+  var SCRIPT_VERSION = "1.2.1";
   var ROOT_ID = "ccs-ld-root";
   var Z = 2147483e3;
   var lastSelectionText = "";
@@ -1840,9 +1905,17 @@ ${appended.join("\n")}`;
     currentResult = result;
     selectedApp = result.app;
     selectedModel = null;
-    includeFullConfig = Boolean(result.config);
+    includeFullConfig = shouldIncludeFullConfigByDefault(result.config);
     refreshModelInfo(text);
     rebuildDeeplink();
+    if (includeFullConfig && currentDeeplink && currentDeeplink.length > MAX_DEEPLINK_LEN) {
+      includeFullConfig = false;
+      rebuildDeeplink();
+      result.warnings = [
+        ...result.warnings || [],
+        "\u5B8C\u6574\u914D\u7F6E\u751F\u6210\u7684\u6DF1\u94FE\u8FC7\u957F\uFF0C\u53EF\u80FD\u65E0\u6CD5\u5524\u8D77 CC Switch\u3002\u5DF2\u6539\u4E3A\u4EC5\u5BFC\u5165 endpoint/key\u3002"
+      ];
+    }
     renderCard(result);
   }
   function refreshModelInfo(sourceText) {
@@ -1889,6 +1962,10 @@ ${appended.join("\n")}`;
     shadow.getElementById("warn").textContent = "";
     shadow.getElementById("cand").classList.remove("show");
     shadow.getElementById("model-row").style.display = "none";
+    shadow.getElementById("config-opt").classList.remove("show");
+    shadow.getElementById("include-config").checked = false;
+    shadow.getElementById("config-meta").textContent = "";
+    includeFullConfig = false;
     const err = shadow.getElementById("err");
     err.style.display = "block";
     err.textContent = msg;
@@ -1924,9 +2001,12 @@ ${appended.join("\n")}`;
     <div><span class="k">model</span>${modelLine}</div>
     <div><span class="k">app</span>${escapeHtml(selectedApp || "\u672A\u9009\u62E9")}</div>
     ${configInfo ? `<div><span class="k">\u5B8C\u6574\u914D\u7F6E</span>${includeFullConfig ? "\u662F\uFF08\u5C06\u5199\u5165\u6DF1\u94FE\uFF09" : "\u5426\uFF08\u4EC5 endpoint/key\uFF09"}</div>
-    <div><span class="k">\u989D\u5916\u5B57\u6BB5</span>${escapeHtml(
+    <div><span class="k">\u9876\u5C42\u5B57\u6BB5</span>${escapeHtml(
       (configInfo.fields || []).slice(0, 12).join("\u3001") || "\uFF08\u975E JSON / \u65E0\u5B57\u6BB5\u540D\uFF09"
     )}${configInfo.fields && configInfo.fields.length > 12 ? "\u2026" : ""}</div>
+    ${configInfo.envFields && configInfo.envFields.length ? `<div><span class="k">env \u5B57\u6BB5</span>${escapeHtml(
+      configInfo.envFields.slice(0, 12).join("\u3001")
+    )}${configInfo.envFields.length > 12 ? "\u2026" : ""}</div>` : ""}
     <div><span class="k">\u914D\u7F6E\u5927\u5C0F</span>${escapeHtml(formatBytes(configInfo.sizeBytes || 0))}</div>` : ""}
   `;
     const configOpt = shadow.getElementById("config-opt");
@@ -1936,7 +2016,8 @@ ${appended.join("\n")}`;
       configOpt.classList.add("show");
       includeCb.checked = includeFullConfig;
       const fieldPreview = (configInfo.fields || []).slice(0, 8).join("\u3001") || "\u539F\u59CB\u914D\u7F6E\u5757";
-      configMeta.textContent = `\u989D\u5916\u5B57\u6BB5\uFF1A${fieldPreview}${configInfo.fields && configInfo.fields.length > 8 ? "\u2026" : ""} \xB7 ${formatBytes(configInfo.sizeBytes || 0)}`;
+      const envPreview = configInfo.envFields && configInfo.envFields.length ? ` \xB7 env\uFF1A${configInfo.envFields.slice(0, 6).join("\u3001")}${configInfo.envFields.length > 6 ? "\u2026" : ""}` : "";
+      configMeta.textContent = `\u9876\u5C42\u5B57\u6BB5\uFF1A${fieldPreview}${configInfo.fields && configInfo.fields.length > 8 ? "\u2026" : ""}${envPreview} \xB7 ${formatBytes(configInfo.sizeBytes || 0)}`;
     } else {
       configOpt.classList.remove("show");
       configMeta.textContent = "";
@@ -1966,6 +2047,16 @@ ${appended.join("\n")}`;
     if (!selectedApp) warnings.push("\u8BF7\u9009\u62E9\u5BFC\u5165\u5230 Claude Code \u6216 Codex");
     if (modelCount === 1) warnings.push("\u5DF2\u81EA\u52A8\u586B\u5165\u68C0\u6D4B\u5230\u7684\u552F\u4E00\u6A21\u578B");
     else if (modelCount > 1) warnings.push(`\u68C0\u6D4B\u5230 ${modelCount} \u4E2A\u6A21\u578B\uFF0C\u53EF\u5728\u4E0B\u65B9\u5207\u6362`);
+    if (configInfo == null ? void 0 : configInfo.risky) {
+      warnings.push(
+        "\u914D\u7F6E\u5305\u542B\u9AD8\u98CE\u9669\u9644\u52A0\u5B57\u6BB5\uFF0C\u8BF7\u786E\u8BA4\u6765\u6E90\u53EF\u4FE1" + (configInfo.riskReasons && configInfo.riskReasons.length ? `\uFF08${configInfo.riskReasons.join("\uFF1B")}\uFF09` : "")
+      );
+    }
+    if (includeFullConfig && currentDeeplink && currentDeeplink.length > MAX_DEEPLINK_LEN * 0.85) {
+      warnings.push(
+        `\u6DF1\u94FE\u8F83\u957F\uFF08${currentDeeplink.length} \u5B57\u7B26\uFF09\uFF0C\u82E5\u65E0\u6CD5\u5524\u8D77\u8BF7\u53D6\u6D88\u300C\u643A\u5E26\u5B8C\u6574\u914D\u7F6E\u300D`
+      );
+    }
     warn.textContent = warnings.join("\uFF1B");
     syncAppButtons();
     shadow.getElementById("open").disabled = !selectedApp;
@@ -1992,6 +2083,13 @@ ${appended.join("\n")}`;
   function onIncludeConfigChange(e) {
     includeFullConfig = !!(e.target && e.target.checked);
     rebuildDeeplink();
+    if (includeFullConfig && currentDeeplink && currentDeeplink.length > MAX_DEEPLINK_LEN) {
+      includeFullConfig = false;
+      rebuildDeeplink();
+      const { shadow } = getUi();
+      shadow.getElementById("include-config").checked = false;
+      showToast("\u5B8C\u6574\u914D\u7F6E\u751F\u6210\u7684\u6DF1\u94FE\u8FC7\u957F\uFF0C\u53EF\u80FD\u65E0\u6CD5\u5524\u8D77 CC Switch\u3002\u5EFA\u8BAE\u4EC5\u5BFC\u5165 endpoint/key\u3002", 4200);
+    }
     if (currentResult) renderCard(currentResult);
   }
   function formatBytes(n) {
