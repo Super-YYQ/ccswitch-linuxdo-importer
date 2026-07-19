@@ -41,7 +41,7 @@
    - 或从 [GitHub Releases](https://github.com/Super-YYQ/ccswitch-linuxdo-importer/releases) 下载对应版本的 `.user.js`
 4. 访问 https://linux.do ，在帖子中选中一段配置文字
 
-确认安装版本：打开确认卡后，元信息末尾应显示当前发布版本（例如 **v1.2.0**）。
+确认安装版本：打开确认卡后，元信息末尾应显示当前发布版本（例如 **v1.2.1**）。
 
 > 若你之前从 `main` 安装过旧版：请卸载后按上面的 `release` 链接重装一次，否则自动更新仍会指向已废弃的 main 产物路径。
 
@@ -176,6 +176,7 @@ CI（`main` / PR）只做 test + build，**不会**更新 `release` 分支。
 
 ## 变更摘要
 
+- **v1.2.1** — bug333 审查：Release 拆 build/publish 最小权限；并发与版本降级保护；深链长度上限；多深链/无 `//` 提取；错误卡清理；高风险配置默认不勾选；env 字段摘要；TextEncoder 字节数
 - **v1.2.0** — 发布链路加固：esbuild IIFE 替代正则剥 export；`@updateURL`/`@downloadURL` 指向 `release` 分支；main 仅源码；打 `v*` tag 才发布
 - **v1.1.7** — 确定性测试密钥；确认卡披露完整 config + 可取消携带；非 provider 深链不亮按钮；URL/Key 按行邻近配对；CI Node 18/20/22
 - **v1.1.6** — 模型最长匹配去重；`filterModelsForApp` 改为排序不删；清理残留测试密钥；历史 `filter-repo` 脱敏

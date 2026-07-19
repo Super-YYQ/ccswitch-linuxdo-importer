@@ -45,7 +45,8 @@ const BEARER_RE = /Bearer\s+([A-Za-z0-9_\-.]{16,})/gi
 const B64_BOUNDARY_L = '(?:^|[\\s"\'`：:，。；、！？]|(?<=[一-鿿]))'
 const B64_BOUNDARY_R = '(?:$|[\\s"\'`，。；、！？]|(?=[一-鿿]))'
 const BASE64_RE = new RegExp(`${B64_BOUNDARY_L}([A-Za-z0-9+/]{40,}={0,2})${B64_BOUNDARY_R}`, 'g')
-const DEEPLINK_RE = /ccswitch:\/\/[^\s"'`<>]+/i
+// Accept both ccswitch://... and ccswitch:... (no authority slashes)
+const DEEPLINK_RE = /ccswitch:(?:\/\/)?[^\s"'`<>]+/gi
 // Known API key prefixes (sk-/g2a_/tp- token-plan, plus rare vendor tags)
 const KEY_PREFIX_RE = /^(sk-ant-|sk-|g2a_|tp-|nk-|pk-|rk-)/i
 const KEY_PREFIX_BODY_RE = /^(sk-ant-|sk-|g2a_|tp-|nk-|pk-|rk-|Bearer\s)/i
@@ -86,9 +87,9 @@ export function parseShareText(text) {
 
   let cleaned = repairBrokenBase64(stripMarkdownFences(raw))
 
-  // 1. Existing ccswitch deep link (provider only)
-  const deep = extractDeeplink(cleaned)
-  if (deep) {
+  // 1. Existing ccswitch deep links (try every match; first valid provider wins)
+  const deeplinks = extractDeeplinks(cleaned)
+  for (const deep of deeplinks) {
     const fromLink = parseDeeplink(deep)
     if (fromLink) {
       fromLink.deeplink = deep
@@ -97,9 +98,9 @@ export function parseShareText(text) {
       }
       return fromLink
     }
-    // Non-provider / malformed: strip so mixed path cannot harvest apiKey from querystring
-    cleaned = cleaned.split(deep).join(' ')
   }
+  // Non-provider / malformed: strip all so mixed path cannot harvest apiKey from querystring
+  if (deeplinks.length) cleaned = stripAllDeeplinks(cleaned)
 
   // 2–6. Prefer complete (endpoint+key) results; otherwise stitch partial hits.
   // Partial JSON from Discourse linkify must not block mixed/base64 key recovery.
@@ -426,9 +427,11 @@ export function looksLikeConfig(text) {
   if (!text || text.trim().length < MIN_SELECTION_LEN) return false
   let t = repairBrokenBase64(normalizeShareText(text))
   if (t.length > MAX_SELECTION_LEN) t = t.slice(0, MAX_SELECTION_LEN)
-  // Only provider deeplinks light the import button (mcp/prompt/skill must not)
-  const deep = extractDeeplink(t)
-  if (deep) return Boolean(parseDeeplink(deep))
+  // Provider deeplink → yes. Non-provider deeplink → strip and keep scanning for
+  // ordinary endpoint/key shares that may follow (do not hard-return false).
+  const deeplinks = extractDeeplinks(t)
+  if (deeplinks.some((d) => Boolean(parseDeeplink(d)))) return true
+  if (deeplinks.length) t = stripAllDeeplinks(t)
   if (/ANTHROPIC_|OPENAI_|CODEX_|BASE_URL|API_KEY|apiKey|baseUrl|endpoint|Base\s*URL/i.test(t))
     return true
   if (/sk-ant-|sk-[A-Za-z0-9]{16,}/.test(t)) return true
@@ -480,12 +483,9 @@ function hasUsefulBase64Blob(text) {
   return false
 }
 
-/**
- * @param {ParseResult} result
- * @param {AppKind} [appOverride]
- * @param {object} [modelInfo] - Optional model extraction result
- * @returns {string}
- */
+/** Conservative cap for custom-protocol URLs (Windows / browsers / desktop apps). */
+export const MAX_DEEPLINK_LEN = 8000
+
 /**
  * @param {ParseResult} result
  * @param {AppKind} [appOverride]
@@ -529,24 +529,110 @@ export function buildDeeplink(result, appOverride, modelInfo, options) {
 
 /**
  * Summarize attached full-config payload for confirm-card disclosure.
+ * Field names only — never values. Nested `env` keys are expanded separately.
  * @param {string|null|undefined} config
- * @returns {{ fields: string[], sizeBytes: number }|null}
+ * @returns {{
+ *   fields: string[],
+ *   envFields: string[],
+ *   sizeBytes: number,
+ *   risky: boolean,
+ *   riskReasons: string[],
+ * }|null}
  */
 export function describeConfigPayload(config) {
   if (!config) return null
   const raw = String(config)
-  const sizeBytes = typeof Buffer !== 'undefined' ? Buffer.byteLength(raw, 'utf8') : raw.length
+  const sizeBytes =
+    typeof TextEncoder !== 'undefined'
+      ? new TextEncoder().encode(raw).byteLength
+      : typeof Buffer !== 'undefined'
+        ? Buffer.byteLength(raw, 'utf8')
+        : raw.length
   /** @type {string[]} */
   let fields = []
+  /** @type {string[]} */
+  let envFields = []
+  /** @type {string[]} */
+  const riskReasons = []
   try {
     const obj = JSON.parse(raw)
     if (obj && typeof obj === 'object' && !Array.isArray(obj)) {
       fields = Object.keys(obj)
+      if (obj.env && typeof obj.env === 'object' && !Array.isArray(obj.env)) {
+        envFields = Object.keys(obj.env)
+      }
+      const riskyNames = fields.filter((k) => isRiskyConfigFieldName(k))
+      if (riskyNames.length) {
+        riskReasons.push(`高风险字段：${riskyNames.slice(0, 6).join('、')}`)
+      }
+      const unknown = fields.filter((k) => !isKnownConfigFieldName(k))
+      if (unknown.length >= 4) {
+        riskReasons.push(`较多未知附加字段（${unknown.length}）`)
+      }
     }
   } catch {
     fields = []
   }
-  return { fields, sizeBytes }
+  return {
+    fields,
+    envFields,
+    sizeBytes,
+    risky: riskReasons.length > 0,
+    riskReasons,
+  }
+}
+
+/** Top-level keys that are expected for ordinary provider env-shaped configs. */
+const KNOWN_CONFIG_FIELDS = new Set([
+  'env',
+  'name',
+  'baseUrl',
+  'base_url',
+  'endpoint',
+  'apiKey',
+  'api_key',
+  'authToken',
+  'auth_token',
+  'model',
+  'models',
+  'websiteUrl',
+  'website_url',
+  'notes',
+  'icon',
+])
+
+/**
+ * @param {string} name
+ */
+function isKnownConfigFieldName(name) {
+  return KNOWN_CONFIG_FIELDS.has(String(name || ''))
+}
+
+/**
+ * Fields that should default the "include full config" checkbox off.
+ * @param {string} name
+ */
+function isRiskyConfigFieldName(name) {
+  const k = String(name || '')
+  if (/usageScript|usage_script|usageAccessToken|usage_access_token/i.test(k)) return true
+  if (/script|command|hook|eval|exec/i.test(k)) return true
+  if (/access.?token|password|secret|private.?key/i.test(k) && !/^api[_-]?key$/i.test(k)) {
+    return true
+  }
+  return false
+}
+
+/**
+ * Default for the confirm-card "include full config" checkbox.
+ * Ordinary env-shaped configs stay on; high-risk extras default off.
+ * @param {string|null|undefined} config
+ * @returns {boolean}
+ */
+export function shouldIncludeFullConfigByDefault(config) {
+  if (!config) return false
+  const info = describeConfigPayload(config)
+  if (!info) return false
+  return !info.risky
 }
 
 /**
@@ -677,9 +763,28 @@ function emptyResult(partial) {
   }
 }
 
-function extractDeeplink(text) {
-  const m = text.match(DEEPLINK_RE)
-  return m ? m[0] : null
+/**
+ * @param {string} text
+ * @returns {string[]}
+ */
+function extractDeeplinks(text) {
+  if (!text) return []
+  const re = new RegExp(DEEPLINK_RE.source, 'gi')
+  const out = []
+  let m
+  while ((m = re.exec(text)) !== null) {
+    if (m[0]) out.push(m[0])
+  }
+  return out
+}
+
+/**
+ * Remove every ccswitch: deeplink token so subsequent parsers cannot
+ * harvest secrets from non-provider query strings.
+ * @param {string} text
+ */
+function stripAllDeeplinks(text) {
+  return String(text || '').replace(new RegExp(DEEPLINK_RE.source, 'gi'), ' ')
 }
 
 /**

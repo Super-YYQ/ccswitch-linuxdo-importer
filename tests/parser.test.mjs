@@ -10,6 +10,8 @@ import {
   enrichTextWithAnchorHrefs,
   selectCandidate,
   describeConfigPayload,
+  shouldIncludeFullConfigByDefault,
+  MAX_DEEPLINK_LEN,
 } from '../userscript/lib/core.mjs'
 
 // Synthetic fixtures only — never paste live share secrets into the suite.
@@ -181,6 +183,43 @@ describe('parseShareText · deeplink', () => {
       // Must not rewrite into a provider import
       assert.equal(r, null, `resource=${resource} should be rejected`)
     }
+  })
+
+  it('skips non-provider deeplink and continues with ordinary endpoint/key text', () => {
+    const mcp = `ccswitch://v1/import?resource=mcp&app=claude&name=X&endpoint=${encodeURIComponent(SYNTH.endpoint)}&apiKey=${SYNTH.skAnt}`
+    const text = `${mcp}
+下面还有：
+url：${SYNTH.endpointRelay}
+key：${SYNTH.skAntMixed}`
+    assert.equal(looksLikeConfig(text), true)
+    const r = parseShareText(text)
+    assert.ok(r)
+    assert.notEqual(r.source, 'deeplink')
+    assert.equal(r.endpoint, SYNTH.endpointRelay)
+    assert.equal(r.apiKey, SYNTH.skAntMixed)
+  })
+
+  it('picks the first provider deeplink when multiple links are present', () => {
+    const mcp = `ccswitch://v1/import?resource=mcp&app=claude&name=X&endpoint=${encodeURIComponent(SYNTH.endpointA)}&apiKey=${SYNTH.skAntA}`
+    const provider = `ccswitch://v1/import?resource=provider&app=codex&name=Second&endpoint=${encodeURIComponent(SYNTH.endpointB)}&apiKey=${SYNTH.skAntB}`
+    const r = parseShareText(`先是 mcp：${mcp}\n再是 provider：${provider}`)
+    assert.ok(r)
+    assert.equal(r.source, 'deeplink')
+    assert.equal(r.app, 'codex')
+    assert.equal(r.endpoint, SYNTH.endpointB)
+    assert.equal(r.apiKey, SYNTH.skAntB)
+    assert.equal(r.name, 'Second')
+  })
+
+  it('parses ccswitch: without authority slashes', () => {
+    const link = `ccswitch:v1/import?resource=provider&app=claude&name=NoSlash&endpoint=${encodeURIComponent(SYNTH.endpoint)}&apiKey=${SYNTH.skAntDeeplink}`
+    assert.equal(looksLikeConfig(`导入：${link}`), true)
+    const r = parseShareText(`导入：${link}`)
+    assert.ok(r)
+    assert.equal(r.source, 'deeplink')
+    assert.equal(r.endpoint, SYNTH.endpoint)
+    assert.equal(r.apiKey, SYNTH.skAntDeeplink)
+    assert.equal(r.name, 'NoSlash')
   })
 })
 
@@ -508,11 +547,19 @@ describe('looksLikeConfig · deeplink gate', () => {
     assert.equal(looksLikeConfig(`一键导入：${link}`), true)
   })
 
-  it('rejects non-provider deeplinks so the floating button stays hidden', () => {
+  it('rejects bare non-provider deeplinks so the floating button stays hidden', () => {
     for (const resource of ['mcp', 'prompt', 'skill']) {
       const link = `ccswitch://v1/import?resource=${resource}&app=claude&name=X&endpoint=${encodeURIComponent(SYNTH.endpoint)}&apiKey=${SYNTH.skAnt}`
       assert.equal(looksLikeConfig(`导入：${link}`), false, `resource=${resource}`)
     }
+  })
+
+  it('accepts non-provider deeplink when ordinary config text follows', () => {
+    const mcp = `ccswitch://v1/import?resource=mcp&app=claude&name=X&endpoint=${encodeURIComponent(SYNTH.endpoint)}&apiKey=${SYNTH.skAnt}`
+    const text = `${mcp}
+url：${SYNTH.endpointRelay}
+key：${SYNTH.skAntMixed}`
+    assert.equal(looksLikeConfig(text), true)
   })
 })
 
@@ -658,17 +705,38 @@ describe('buildDeeplink', () => {
     assert.ok(!/[?&]config=/.test(without), without)
   })
 
-  it('describeConfigPayload lists fields and size', () => {
+  it('describeConfigPayload lists fields, env keys, risk and utf8 size', () => {
     const cfg = JSON.stringify({
-      name: 'X',
-      env: { A: '1' },
+      env: {
+        ANTHROPIC_BASE_URL: SYNTH.endpoint,
+        ANTHROPIC_AUTH_TOKEN: SYNTH.skAnt,
+        ANTHROPIC_MODEL: 'claude-sonnet-4',
+      },
       usageScript: 'echo',
     })
     const info = describeConfigPayload(cfg)
     assert.ok(info)
     assert.ok(info.fields.includes('env'))
     assert.ok(info.fields.includes('usageScript'))
+    assert.ok(info.envFields.includes('ANTHROPIC_BASE_URL'))
+    assert.ok(info.envFields.includes('ANTHROPIC_AUTH_TOKEN'))
+    assert.equal(info.risky, true)
+    assert.ok(info.riskReasons.some((w) => /usageScript|高风险/.test(w)))
     assert.ok(info.sizeBytes > 10)
+    assert.equal(shouldIncludeFullConfigByDefault(cfg), false)
+    const plainEnv = JSON.stringify({
+      env: { ANTHROPIC_BASE_URL: SYNTH.endpoint, ANTHROPIC_AUTH_TOKEN: SYNTH.skAnt },
+    })
+    assert.equal(shouldIncludeFullConfigByDefault(plainEnv), true)
+    // Chinese content: TextEncoder byte length > string length
+    const cjk = JSON.stringify({ env: { NOTE: '中文配置说明一二三四' } })
+    const cjkInfo = describeConfigPayload(cjk)
+    assert.ok(cjkInfo.sizeBytes > cjk.length)
+  })
+
+  it('MAX_DEEPLINK_LEN is a finite conservative cap', () => {
+    assert.equal(typeof MAX_DEEPLINK_LEN, 'number')
+    assert.ok(MAX_DEEPLINK_LEN >= 2000 && MAX_DEEPLINK_LEN <= 32000)
   })
 })
 

@@ -10,6 +10,8 @@ import {
   selectCandidate,
   enrichTextWithAnchorHrefs,
   describeConfigPayload,
+  shouldIncludeFullConfigByDefault,
+  MAX_DEEPLINK_LEN,
 } from './lib/core.mjs'
 import { extractModels, filterModelsForApp } from './lib/model-extractor.mjs'
 
@@ -379,9 +381,18 @@ function onImportClick(e) {
   currentResult = result
   selectedApp = result.app
   selectedModel = null
-  includeFullConfig = Boolean(result.config)
+  includeFullConfig = shouldIncludeFullConfigByDefault(result.config)
   refreshModelInfo(text)
   rebuildDeeplink()
+  // Long full-config deeplinks are unreliable over custom protocols; drop config.
+  if (includeFullConfig && currentDeeplink && currentDeeplink.length > MAX_DEEPLINK_LEN) {
+    includeFullConfig = false
+    rebuildDeeplink()
+    result.warnings = [
+      ...(result.warnings || []),
+      '完整配置生成的深链过长，可能无法唤起 CC Switch。已改为仅导入 endpoint/key。',
+    ]
+  }
   renderCard(result)
 }
 
@@ -444,6 +455,10 @@ function openErrorCard(msg) {
   shadow.getElementById('warn').textContent = ''
   shadow.getElementById('cand').classList.remove('show')
   shadow.getElementById('model-row').style.display = 'none'
+  shadow.getElementById('config-opt').classList.remove('show')
+  shadow.getElementById('include-config').checked = false
+  shadow.getElementById('config-meta').textContent = ''
+  includeFullConfig = false
   const err = shadow.getElementById('err')
   err.style.display = 'block'
   err.textContent = msg
@@ -503,9 +518,16 @@ function renderCard(result) {
     ${
       configInfo
         ? `<div><span class="k">完整配置</span>${includeFullConfig ? '是（将写入深链）' : '否（仅 endpoint/key）'}</div>
-    <div><span class="k">额外字段</span>${escapeHtml(
+    <div><span class="k">顶层字段</span>${escapeHtml(
       (configInfo.fields || []).slice(0, 12).join('、') || '（非 JSON / 无字段名）',
     )}${configInfo.fields && configInfo.fields.length > 12 ? '…' : ''}</div>
+    ${
+      configInfo.envFields && configInfo.envFields.length
+        ? `<div><span class="k">env 字段</span>${escapeHtml(
+            configInfo.envFields.slice(0, 12).join('、'),
+          )}${configInfo.envFields.length > 12 ? '…' : ''}</div>`
+        : ''
+    }
     <div><span class="k">配置大小</span>${escapeHtml(formatBytes(configInfo.sizeBytes || 0))}</div>`
         : ''
     }
@@ -518,9 +540,15 @@ function renderCard(result) {
     configOpt.classList.add('show')
     includeCb.checked = includeFullConfig
     const fieldPreview = (configInfo.fields || []).slice(0, 8).join('、') || '原始配置块'
-    configMeta.textContent = `额外字段：${fieldPreview}${
+    const envPreview =
+      configInfo.envFields && configInfo.envFields.length
+        ? ` · env：${configInfo.envFields.slice(0, 6).join('、')}${
+            configInfo.envFields.length > 6 ? '…' : ''
+          }`
+        : ''
+    configMeta.textContent = `顶层字段：${fieldPreview}${
       configInfo.fields && configInfo.fields.length > 8 ? '…' : ''
-    } · ${formatBytes(configInfo.sizeBytes || 0)}`
+    }${envPreview} · ${formatBytes(configInfo.sizeBytes || 0)}`
   } else {
     configOpt.classList.remove('show')
     configMeta.textContent = ''
@@ -557,6 +585,23 @@ function renderCard(result) {
   if (!selectedApp) warnings.push('请选择导入到 Claude Code 或 Codex')
   if (modelCount === 1) warnings.push('已自动填入检测到的唯一模型')
   else if (modelCount > 1) warnings.push(`检测到 ${modelCount} 个模型，可在下方切换`)
+  if (configInfo?.risky) {
+    warnings.push(
+      '配置包含高风险附加字段，请确认来源可信' +
+        (configInfo.riskReasons && configInfo.riskReasons.length
+          ? `（${configInfo.riskReasons.join('；')}）`
+          : ''),
+    )
+  }
+  if (
+    includeFullConfig &&
+    currentDeeplink &&
+    currentDeeplink.length > MAX_DEEPLINK_LEN * 0.85
+  ) {
+    warnings.push(
+      `深链较长（${currentDeeplink.length} 字符），若无法唤起请取消「携带完整配置」`,
+    )
+  }
   warn.textContent = warnings.join('；')
 
   syncAppButtons()
@@ -587,6 +632,17 @@ function onModelSelect(e) {
 function onIncludeConfigChange(e) {
   includeFullConfig = !!(e.target && e.target.checked)
   rebuildDeeplink()
+  if (
+    includeFullConfig &&
+    currentDeeplink &&
+    currentDeeplink.length > MAX_DEEPLINK_LEN
+  ) {
+    includeFullConfig = false
+    rebuildDeeplink()
+    const { shadow } = getUi()
+    shadow.getElementById('include-config').checked = false
+    showToast('完整配置生成的深链过长，可能无法唤起 CC Switch。建议仅导入 endpoint/key。', 4200)
+  }
   if (currentResult) renderCard(currentResult)
 }
 
