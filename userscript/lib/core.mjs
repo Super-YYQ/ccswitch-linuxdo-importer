@@ -38,6 +38,10 @@ const ENV_KEY_KEYS = [
 ]
 
 const URL_RE = /https?:\/\/[^\s"'`<>，。；、）)\]}]+/gi
+// Discourse onebox / paste often drops the scheme: grok2api-v2.onrender.com
+// Require a multi-label host + common TLD; reject emails via (?<!@).
+const BARE_HOST_RE =
+  /(?<!@)\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:com|net|org|io|dev|app|ai|cc|me|co|info|xyz|top|tech|cloud|run|site|online|pro|page|link|live|tv|us|uk|cn|jp|de|fr|ru|br|in|au|ca|nl|se|no|fi|pl|cz|ch|at|be|es|it|pt|kr|tw|hk|sg|my|id|ph|vn|th|edu|gov)(?:\/[^\s"'`<>，。；、）)\]}]*)?/gi
 const SK_ANT_RE = /sk-ant-[A-Za-z0-9_\-]{10,}/g
 const SK_RE = /sk-[A-Za-z0-9_\-]{16,}/g
 const BEARER_RE = /Bearer\s+([A-Za-z0-9_\-.]{16,})/gi
@@ -435,14 +439,20 @@ export function looksLikeConfig(text) {
   if (/ANTHROPIC_|OPENAI_|CODEX_|BASE_URL|API_KEY|apiKey|baseUrl|endpoint|Base\s*URL/i.test(t))
     return true
   if (/sk-ant-|sk-[A-Za-z0-9]{16,}/.test(t)) return true
+  // Vendor keys (g2a_ Grok2API, tp- token-plan, …) alone are enough to light the button
+  if (VENDOR_KEY_RE.test(t)) return true
+  VENDOR_KEY_RE.lastIndex = 0
   if (/https?:\/\//i.test(t) && /sk-|Bearer\s+/i.test(t)) return true
+  // bare host (no scheme) + any known key shape — Discourse onebox paste
+  if (hasBareHost(t) && (/sk-|Bearer\s+/i.test(t) || VENDOR_KEY_RE.test(t))) return true
+  VENDOR_KEY_RE.lastIndex = 0
   // labeled shares: url： / key： / 密钥： / API Key（...）
   if (
     /(?:url|base[_-]?url|base\s*url|endpoint|key|api[_-]?key|api\s*key|token|密钥|地址|接口)/i.test(
       t,
     )
   ) {
-    if (/https?:\/\//i.test(t) || /[A-Za-z0-9_+\-/]{16,}/.test(t)) return true
+    if (/https?:\/\//i.test(t) || hasBareHost(t) || /[A-Za-z0-9_+\-/]{16,}/.test(t)) return true
   }
   // url + base64-ish token (key often base64-encoded on linux.do)
   if (/https?:\/\//i.test(t) && /[A-Za-z0-9+/]{32,}={0,2}/.test(t)) return true
@@ -450,6 +460,64 @@ export function looksLikeConfig(text) {
   if (hasUsefulBase64Blob(t)) return true
   if (/\{[\s\S]*"(?:apiKey|api_key|baseUrl|endpoint|base_url)"[\s\S]*\}/.test(t)) return true
   return false
+}
+
+/**
+ * True when text contains a plausible bare hostname (no scheme).
+ * @param {string} text
+ */
+function hasBareHost(text) {
+  BARE_HOST_RE.lastIndex = 0
+  return BARE_HOST_RE.test(text)
+}
+
+/**
+ * Collect http(s) URLs plus bare hosts normalized to https://.
+ * Skips hosts already covered by a full URL match.
+ * @param {string} text
+ * @returns {string[]}
+ */
+function collectEndpoints(text) {
+  const full = matchAll(text, URL_RE).map(cleanUrl).filter((u) => isHttpUrl(u))
+  const bare = matchAll(text, BARE_HOST_RE)
+    .map((h) => normalizeBareHost(h))
+    .filter(Boolean)
+  // Drop bare hosts already present as full URLs (or as their host part)
+  const covered = new Set()
+  for (const u of full) {
+    covered.add(u.toLowerCase())
+    try {
+      covered.add(new URL(u).host.toLowerCase())
+    } catch {
+      /* ignore */
+    }
+  }
+  const bareUrls = []
+  for (const h of bare) {
+    const hostOnly = h.replace(/^https?:\/\//i, '').split('/')[0].toLowerCase()
+    if (covered.has(h.toLowerCase()) || covered.has(hostOnly)) continue
+    // Skip if this "host" is actually inside an already-matched full URL string
+    if (full.some((u) => u.toLowerCase().includes(hostOnly))) continue
+    bareUrls.push(h)
+    covered.add(hostOnly)
+  }
+  return unique([...full, ...bareUrls])
+}
+
+/**
+ * @param {string} host
+ * @returns {string|null}
+ */
+function normalizeBareHost(host) {
+  let h = cleanUrl(String(host || ''))
+  if (!h) return null
+  // Reject if it already has a scheme (URL_RE handles those)
+  if (/^[a-z][a-z0-9+.-]*:/i.test(h)) return null
+  // Reject email-like leftovers
+  if (h.includes('@')) return null
+  // Must look like host.tld[/path]
+  if (!/^[a-z0-9][a-z0-9.-]*\.[a-z]{2,}(?:\/\S*)?$/i.test(h)) return null
+  return `https://${h}`
 }
 
 /**
@@ -1306,7 +1374,7 @@ function tryParseMixed(text) {
   const labeled = extractLabeledFields(text)
 
   const urls = unique([
-    ...matchAll(text, URL_RE).map(cleanUrl),
+    ...collectEndpoints(text),
     ...(labeled.endpoint ? [labeled.endpoint] : []),
   ])
     .filter((u) => isHttpUrl(u))

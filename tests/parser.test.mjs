@@ -76,6 +76,20 @@ describe('looksLikeConfig', () => {
     const b64 = base64Encode(SYNTH.skPlain)
     assert.equal(looksLikeConfig(`请自行解码\n${b64}\n谢谢`), true)
   })
+
+  it('accepts g2a_ vendor keys (with or without https URL)', () => {
+    const key = SYNTH.g2a
+    assert.equal(looksLikeConfig(key), true)
+    assert.equal(
+      looksLikeConfig(`https://grok2api-v2.onrender.com\nGrok2API\n${key}`),
+      true,
+    )
+    // Discourse onebox often pastes bare host without scheme
+    assert.equal(
+      looksLikeConfig(`grok2api-v2.onrender.com\nGrok2API\n总结\n${key}`),
+      true,
+    )
+  })
 })
 
 describe('parseShareText · env', () => {
@@ -427,6 +441,31 @@ ${SYNTH.endpointAnthropic}`
     assert.equal(r.endpoint, SYNTH.endpoint)
     assert.equal(r.apiKey, SYNTH.skAnt)
     assert.ok(r.warnings.some((w) => /选区过大|截断/.test(w)))
+  })
+
+  it('parses Discourse onebox bare host + g2a_ key (no https scheme in selection)', () => {
+    // linux.do onebox shows host text without scheme; key sits under 总结
+    const text = `c
+grok2api-v2.onrender.com
+Grok2API
+总结
+${SYNTH.g2a}`
+    assert.equal(looksLikeConfig(text), true)
+    const r = parseShareText(text)
+    assert.ok(r)
+    assert.equal(r.apiKey, SYNTH.g2a)
+    assert.equal(r.endpoint, 'https://grok2api-v2.onrender.com')
+  })
+
+  it('parses https URL + g2a_ key without labels', () => {
+    const text = `https://grok2api-v2.onrender.com
+Grok2API
+${SYNTH.g2a}`
+    assert.equal(looksLikeConfig(text), true)
+    const r = parseShareText(text)
+    assert.ok(r)
+    assert.equal(r.endpoint, 'https://grok2api-v2.onrender.com')
+    assert.equal(r.apiKey, SYNTH.g2a)
   })
 })
 
