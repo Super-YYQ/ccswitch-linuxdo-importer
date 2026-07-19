@@ -3,7 +3,10 @@ name: Release
 # Publish the Tampermonkey userscript only when a version tag is pushed.
 # main holds source; the `release` branch holds the stable install artifact.
 #
-# Security: build/test run with contents:read only; publish job alone gets write.
+# Security:
+# - build/test: contents:read only, no persisted git credentials
+# - publish: contents:write, but NO npm install; guard is a pre-bundled artifact
+# - git credentials are injected only for the final push (not at checkout)
 on:
   push:
     tags:
@@ -50,6 +53,19 @@ jobs:
       - name: Build userscript
         run: npm run build
 
+      - name: Bundle release guard (semver inlined; publish job needs zero npm install)
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          npx esbuild scripts/release-guard.mjs \
+            --bundle \
+            --platform=node \
+            --format=esm \
+            --outfile=dist/release-guard.mjs
+          test -f dist/release-guard.mjs
+          # Smoke: first-publish path must allow
+          node dist/release-guard.mjs "" "0.0.1" - package.json
+
       - name: Read package version
         id: pkg
         run: |
@@ -62,11 +78,13 @@ jobs:
             exit 1
           fi
 
-      - name: Upload userscript artifact
+      - name: Upload release artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: userscript
-          path: userscript/ccswitch-linuxdo-importer.user.js
+          name: release-artifacts
+          path: |
+            userscript/ccswitch-linuxdo-importer.user.js
+            dist/release-guard.mjs
           if-no-files-found: error
 
     outputs:
@@ -80,34 +98,34 @@ jobs:
     permissions:
       contents: write
     steps:
+      # No git credentials at checkout — token is only injected for the final push.
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
-          # Keep credentials for authenticated push to the release branch.
-          persist-credentials: true
+          persist-credentials: false
 
-      - name: Download userscript artifact
+      - name: Download release artifacts
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: userscript
-          path: userscript
+          name: release-artifacts
+          path: .
 
+      # Runtime only — no npm ci / no install scripts in the write-permission job.
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 20
-
-      # Needed for scripts/release-guard.mjs (semver + sha256 compare). No tests run here.
-      - name: Install (release guard only)
-        run: npm ci
 
       - name: Publish userscript to release branch
         env:
           VERSION: ${{ needs.build.outputs.version }}
           TAG: ${{ needs.build.outputs.tag }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           ARTIFACT="userscript/ccswitch-linuxdo-importer.user.js"
+          GUARD="dist/release-guard.mjs"
           test -f "$ARTIFACT"
+          test -f "$GUARD"
 
           CURRENT_FILE=""
           CURRENT_VERSION=""
@@ -122,9 +140,9 @@ jobs:
           fi
 
           if [ -n "${CURRENT_FILE}" ]; then
-            node scripts/release-guard.mjs "$CURRENT_VERSION" "$VERSION" "$CURRENT_FILE" "$ARTIFACT"
+            node "$GUARD" "$CURRENT_VERSION" "$VERSION" "$CURRENT_FILE" "$ARTIFACT"
           else
-            node scripts/release-guard.mjs "" "$VERSION" - "$ARTIFACT"
+            node "$GUARD" "" "$VERSION" - "$ARTIFACT"
           fi
           rm -f "${CURRENT_FILE:-}"
 
@@ -155,7 +173,13 @@ jobs:
             echo "No userscript changes to publish"
           else
             git -C "$WORKDIR" commit -m "release: userscript v${VERSION}"
+            # Inject write credentials only for this push (checkout used persist-credentials: false).
+            git -C "$WORKDIR" remote set-url origin \
+              "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
             git -C "$WORKDIR" push origin HEAD:release
+            # Drop token from remote URL after push.
+            git -C "$WORKDIR" remote set-url origin \
+              "https://github.com/${GITHUB_REPOSITORY}.git"
           fi
 
       - name: Create GitHub Release

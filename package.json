@@ -1,13 +1,14 @@
 {
   "name": "ccswitch-linuxdo-importer",
-  "version": "1.2.2",
+  "version": "1.2.3",
   "private": true,
   "description": "Tampermonkey userscript: select API share text on linux.do and open CC Switch import deeplink (with model auto-detect)",
   "type": "module",
   "scripts": {
     "test": "node --test tests/parser.test.mjs tests/model-extractor.test.mjs tests/release-guard.test.mjs && node tests/variants-check.mjs",
     "build": "node scripts/build.mjs",
-    "check": "npm test && npm run build"
+    "check": "npm test && npm run build",
+    "build:guard": "node ./node_modules/esbuild/bin/esbuild scripts/release-guard.mjs --bundle --platform=node --format=esm --outfile=dist/release-guard.mjs"
   },
   "engines": {
     "node": ">=18"
