@@ -350,6 +350,23 @@ base url：${SYNTH.endpoint}`
     assert.equal(r.endpoint, SYNTH.endpoint)
   })
 
+  it('strips CJK watermark mid plain sk- key (linux.do anti-scrape, not base64)', () => {
+    // Real-world pattern: sk-…删掉我… continues as hex body; must not truncate at CJK.
+    const clean = 'sk-testonlyaaaaaaaabbbbbbbbccccccccddddddddeeeeeeee'
+    const withWatermark =
+      'sk-testonlyaaaaaaaabbbbbbbb' + '删掉我' + 'ccccccccddddddddeeeeeeee'
+    const text = `openfly.cc
+Sub2API - AI API Gateway
+${withWatermark}
+
+想测一下高并发是否稳定`
+    assert.equal(looksLikeConfig(text), true)
+    const r = parseShareText(text)
+    assert.ok(r)
+    assert.equal(r.apiKey, clean)
+    assert.equal(r.endpoint, 'https://openfly.cc')
+  })
+
   it('parses newapi_channel_conn JSON with base64 key field', () => {
     const b64 = base64Encode(SYNTH.skPlain)
     const text = `{"_type":"newapi_channel_conn","key":"${b64}","url":"${SYNTH.endpointNewapi}"}

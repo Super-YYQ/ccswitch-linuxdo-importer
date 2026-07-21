@@ -42,8 +42,12 @@ const URL_RE = /https?:\/\/[^\s"'`<>，。；、）)\]}]+/gi
 // Require a multi-label host + common TLD; reject emails via (?<!@).
 const BARE_HOST_RE =
   /(?<!@)\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:com|net|org|io|dev|app|ai|cc|me|co|info|xyz|top|tech|cloud|run|site|online|pro|page|link|live|tv|us|uk|cn|jp|de|fr|ru|br|in|au|ca|nl|se|no|fi|pl|cz|ch|at|be|es|it|pt|kr|tw|hk|sg|my|id|ph|vn|th|edu|gov)(?:\/[^\s"'`<>，。；、）)\]}]*)?/gi
-const SK_ANT_RE = /sk-ant-[A-Za-z0-9_\-]{10,}/g
-const SK_RE = /sk-[A-Za-z0-9_\-]{16,}/g
+// Allow short CJK / non-ASCII runs mid-key (linux.do anti-scrape watermarks like
+// 「删掉我」「去除文中」). Lookahead requires the key body to continue in ASCII so
+// trailing Chinese prose is not swallowed. sanitizeApiKey strips the watermark later.
+const SK_KEY_BODY = '(?:[A-Za-z0-9_\\-]|[^\\x00-\\x7F]{1,12}(?=[A-Za-z0-9_\\-]))'
+const SK_ANT_RE = new RegExp(`sk-ant-${SK_KEY_BODY}{10,}`, 'g')
+const SK_RE = new RegExp(`sk-${SK_KEY_BODY}{16,}`, 'g')
 const BEARER_RE = /Bearer\s+([A-Za-z0-9_\-.]{16,})/gi
 // CJK / fullwidth punct count as token boundaries — linux.do often glues base64 after Chinese prose
 const B64_BOUNDARY_L = '(?:^|[\\s"\'`：:，。；、！？]|(?<=[一-鿿]))'

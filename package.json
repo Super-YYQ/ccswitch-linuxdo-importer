@@ -1,6 +1,6 @@
 {
   "name": "ccswitch-linuxdo-importer",
-  "version": "1.2.4",
+  "version": "1.2.5",
   "private": true,
   "description": "Tampermonkey userscript: select API share text on linux.do and open CC Switch import deeplink (with model auto-detect)",
   "type": "module",
