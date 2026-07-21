@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         CC Switch Importer for linux.do
 // @namespace    https://github.com/Super-YYQ/ccswitch-linuxdo-importer
-// @version      1.2.4
+// @version      1.2.5
 // @description  选中 linux.do 分享文本，一键导入 CC Switch（Claude Code / Codex，自动识别模型）
 // @author       CC Switch Importer Contributors
 // @match        https://linux.do/*
@@ -54,8 +54,9 @@
   ];
   var URL_RE = /https?:\/\/[^\s"'`<>，。；、）)\]}]+/gi;
   var BARE_HOST_RE = /(?<!@)\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:com|net|org|io|dev|app|ai|cc|me|co|info|xyz|top|tech|cloud|run|site|online|pro|page|link|live|tv|us|uk|cn|jp|de|fr|ru|br|in|au|ca|nl|se|no|fi|pl|cz|ch|at|be|es|it|pt|kr|tw|hk|sg|my|id|ph|vn|th|edu|gov)(?:\/[^\s"'`<>，。；、）)\]}]*)?/gi;
-  var SK_ANT_RE = /sk-ant-[A-Za-z0-9_\-]{10,}/g;
-  var SK_RE = /sk-[A-Za-z0-9_\-]{16,}/g;
+  var SK_KEY_BODY = "(?:[A-Za-z0-9_\\-]|[^\\x00-\\x7F]{1,12}(?=[A-Za-z0-9_\\-]))";
+  var SK_ANT_RE = new RegExp(`sk-ant-${SK_KEY_BODY}{10,}`, "g");
+  var SK_RE = new RegExp(`sk-${SK_KEY_BODY}{16,}`, "g");
   var BEARER_RE = /Bearer\s+([A-Za-z0-9_\-.]{16,})/gi;
   var B64_BOUNDARY_L = "(?:^|[\\s\"'`\uFF1A:\uFF0C\u3002\uFF1B\u3001\uFF01\uFF1F]|(?<=[\u4E00-\u9FFF]))";
   var B64_BOUNDARY_R = "(?:$|[\\s\"'`\uFF0C\u3002\uFF1B\u3001\uFF01\uFF1F]|(?=[\u4E00-\u9FFF]))";
@@ -1615,7 +1616,7 @@ ${appended.join("\n")}`;
   }
 
   // userscript/ui-main.js
-  var SCRIPT_VERSION = "1.2.4";
+  var SCRIPT_VERSION = "1.2.5";
   var ROOT_ID = "ccs-ld-root";
   var Z = 2147483e3;
   var lastSelectionText = "";
