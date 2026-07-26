@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         CC Switch Importer for linux.do
 // @namespace    https://github.com/Super-YYQ/ccswitch-linuxdo-importer
-// @version      1.2.5
+// @version      1.2.6
 // @description  选中 linux.do 分享文本，一键导入 CC Switch（Claude Code / Codex，自动识别模型）
 // @author       CC Switch Importer Contributors
 // @match        https://linux.do/*
@@ -53,7 +53,7 @@
     "TOKEN"
   ];
   var URL_RE = /https?:\/\/[^\s"'`<>，。；、）)\]}]+/gi;
-  var BARE_HOST_RE = /(?<!@)\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:com|net|org|io|dev|app|ai|cc|me|co|info|xyz|top|tech|cloud|run|site|online|pro|page|link|live|tv|us|uk|cn|jp|de|fr|ru|br|in|au|ca|nl|se|no|fi|pl|cz|ch|at|be|es|it|pt|kr|tw|hk|sg|my|id|ph|vn|th|edu|gov)(?:\/[^\s"'`<>，。；、）)\]}]*)?/gi;
+  var BARE_HOST_RE = /(?<![@.\w-])(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:com|net|org|io|dev|app|ai|cc|me|co|info|xyz|top|tech|cloud|run|site|online|pro|page|link|live|tv|us|uk|cn|jp|de|fr|ru|br|in|au|ca|nl|se|no|fi|pl|cz|ch|at|be|es|it|pt|kr|tw|hk|sg|my|id|ph|vn|th|edu|gov)(?:\/[^\s"'`<>，。；、）)\]}]*)?/gi;
   var SK_KEY_BODY = "(?:[A-Za-z0-9_\\-]|[^\\x00-\\x7F]{1,12}(?=[A-Za-z0-9_\\-]))";
   var SK_ANT_RE = new RegExp(`sk-ant-${SK_KEY_BODY}{10,}`, "g");
   var SK_RE = new RegExp(`sk-${SK_KEY_BODY}{16,}`, "g");
@@ -80,7 +80,7 @@
         if (oversized) {
           fromLink.warnings = [...fromLink.warnings || [], "\u9009\u533A\u8FC7\u5927\uFF0C\u5DF2\u622A\u65AD\u540E\u518D\u89E3\u6790"];
         }
-        return fromLink;
+        return finalizeResult(fromLink, cleaned);
       }
     }
     if (deeplinks.length) cleaned = stripAllDeeplinks(cleaned);
@@ -1019,7 +1019,7 @@ ${appended.join("\n")}`;
       ...extractLooseKeys(text),
       ...extractBase64DecodedKeys(text),
       ...labeled.apiKey ? [labeled.apiKey] : []
-    ]).map((k) => maybeDecodeKey(k));
+    ]).map((k) => maybeDecodeKey(k)).filter((k) => k && (hasKeyPrefix(k) || lookLikeKeyValue(k)));
     const apiKeys = unique(keys).slice(0, MAX_KEYS);
     if (urls.length === 0 && apiKeys.length === 0) return null;
     const candidates = buildCandidatePairs(urls, apiKeys, text, labeled);
@@ -1083,9 +1083,11 @@ ${appended.join("\n")}`;
       for (let i = 0; i < n && pairs.length < MAX_CANDIDATES; i++) {
         add(urls[i] || urls[0], apiKeys[i] || apiKeys[0]);
       }
-      outer: for (const u of urls) {
-        for (const k of apiKeys) {
-          if (!add(u, k)) break outer;
+      if (pairs.length < 2) {
+        outer: for (const u of urls) {
+          for (const k of apiKeys) {
+            if (!add(u, k)) break outer;
+          }
         }
       }
     } else if (urls.length === 0) {
@@ -1215,7 +1217,22 @@ ${appended.join("\n")}`;
     return v.replace(/[，。；、！？]+$/g, "");
   }
   function lookLikeKeyValue(v) {
-    return !!v && (KEY_PREFIX_BODY_RE.test(v) || /^[A-Za-z0-9+/_-]{16,}={0,2}$/.test(v) || v.length >= 12);
+    if (!v) return false;
+    const s = String(v).trim();
+    if (!s || s.length > 512) return false;
+    if (/^https?:\/\//i.test(s) || /\s/.test(s)) return false;
+    if (KEY_PREFIX_BODY_RE.test(s)) {
+      const stripped = s.replace(/[^\x20-\x7E]/g, "");
+      return stripped.length >= 8 && stripped.length <= 512;
+    }
+    if (/[^\x20-\x7E]/.test(s)) return false;
+    if (/^[A-Za-z0-9+/]+={1,2}$/.test(s) && s.length >= 20) return true;
+    if (/^[A-Za-z0-9+/]{32,}$/.test(s)) return true;
+    if (/^[A-Za-z0-9_-]{32,}={0,2}$/.test(s) && !/(?:your|please|example|xxxx|todo|changeme)/i.test(s)) {
+      return true;
+    }
+    if (/^[0-9a-fA-F]{24,}$/.test(s) && s.length % 2 === 0) return true;
+    return false;
   }
   function assignLabeledField(result, kind, value) {
     if (!kind || value == null || value === "") return;
@@ -1227,7 +1244,9 @@ ${appended.join("\n")}`;
       else return;
     } else if (kind === "key") {
       if (result.apiKey) return;
-      result.apiKey = String(value).replace(/\s+/g, "");
+      const raw = String(value).replace(/\s+/g, "");
+      if (/^https?:\/\//i.test(raw) || !lookLikeKeyValue(raw)) return;
+      result.apiKey = raw;
     } else if (kind === "name") {
       if (result.name) return;
       result.name = String(value).trim();
@@ -1389,8 +1408,10 @@ ${appended.join("\n")}`;
       for (const chunk of afterLabel) {
         const m = chunk.match(/[:：]\s*([A-Za-z0-9+/_-]{20,}={0,2})/);
         if (m) {
-          const decoded = decodeKeyBody(m[1]);
-          if (decoded) out.push(decoded);
+          const raw = m[1];
+          if (!lookLikeKeyValue(raw) && !KEY_PREFIX_BODY_RE.test(raw)) continue;
+          const decoded = decodeKeyBody(raw);
+          if (decoded && (hasKeyPrefix(decoded) || lookLikeKeyValue(decoded))) out.push(decoded);
         }
       }
     }
@@ -1459,9 +1480,15 @@ ${appended.join("\n")}`;
   function scoreFields(fields, app) {
     let s = 0.3;
     if (fields.endpoint) s += 0.35;
-    if (fields.apiKey) s += 0.35;
+    if (fields.apiKey) {
+      s += 0.35;
+      const k = String(fields.apiKey);
+      if (!KEY_PREFIX_RE.test(k) && !KEY_PREFIX_BODY_RE.test(k)) {
+        s -= 0.25;
+      }
+    }
     if (app) s += 0.1;
-    return Math.min(1, s);
+    return Math.min(1, Math.max(0, s));
   }
   function buildWarnings(fields) {
     const w = [];
@@ -1469,6 +1496,14 @@ ${appended.join("\n")}`;
     if (!fields.endpoint && fields.apiKey) w.push("\u672A\u8BC6\u522B\u5230 endpoint/base URL\uFF0C\u4ECD\u53EF\u5C1D\u8BD5\u5BFC\u5165");
     if (fields.endpoint && !/^https?:\/\//i.test(fields.endpoint)) {
       w.push("endpoint \u4E0D\u662F http(s) URL");
+    }
+    if (fields.apiKey) {
+      const k = String(fields.apiKey);
+      if (/^https?:\/\//i.test(k)) {
+        w.push("apiKey \u770B\u8D77\u6765\u50CF URL\uFF0C\u8BF7\u6838\u5BF9");
+      } else if (!KEY_PREFIX_RE.test(k) && !KEY_PREFIX_BODY_RE.test(k) && k.length < 24) {
+        w.push("apiKey \u5F62\u6001\u8F83\u5F31\uFF0C\u8BF7\u6838\u5BF9\u540E\u518D\u5BFC\u5165");
+      }
     }
     return w;
   }
@@ -1517,16 +1552,14 @@ ${appended.join("\n")}`;
 
   // userscript/lib/model-extractor.mjs
   var MODEL_RES = [
-    // Claude (longer / more specific first)
+    // Claude (longer / more specific first). Full ids with date or minor:
+    //   claude-sonnet-4-20250514, claude-opus-4-1, claude-haiku-4.5
     /claude-3\.5-sonnet(?:-\d{8})?/gi,
     /claude-3-sonnet(?:-\d{8})?/gi,
     /claude-3\.5-haiku(?:-\d{8})?/gi,
     /claude-3-haiku(?:-\d{8})?/gi,
     /claude-3-opus(?:-\d{8})?/gi,
-    /claude-sonnet-4\.5/gi,
-    /claude-opus-4\.8/gi,
-    /claude-sonnet-4(?!\.\d)/gi,
-    /claude-opus-4(?!\.\d)/gi,
+    /claude-(?:haiku|sonnet|opus)-\d+(?:\.\d+)?(?:-(?:\d{8}|\d{1,2}))?(?![a-z0-9.])/gi,
     /\bclaude-sonnet\b/gi,
     /\bclaude-haiku\b/gi,
     /\bclaude-opus\b/gi,
@@ -1563,7 +1596,7 @@ ${appended.join("\n")}`;
     if (!text) {
       return { model: null, haikuModel: null, sonnetModel: null, opusModel: null, models: [] };
     }
-    const scanText = String(text).replace(/[A-Za-z0-9+/_-]{24,}={0,2}/g, " ").replace(/\bsk-(?:ant-)?[A-Za-z0-9_-]{8,}\b/gi, " ").replace(/\b(?:g2a_|tp-|nk-|pk-|rk-)[A-Za-z0-9_-]{8,}\b/gi, " ");
+    const scanText = String(text).replace(/[A-Za-z0-9+/]{24,}={0,2}/g, " ").replace(/[A-Za-z0-9_]{32,}={0,2}/g, " ").replace(/\bsk-(?:ant-)?[A-Za-z0-9_-]{8,}\b/gi, " ").replace(/\b(?:g2a_|tp-|nk-|pk-|rk-)[A-Za-z0-9_-]{8,}\b/gi, " ");
     const spans = [];
     for (const re of MODEL_RES) {
       const r = new RegExp(re.source, re.flags.includes("g") ? re.flags : re.flags + "g");
@@ -1616,7 +1649,7 @@ ${appended.join("\n")}`;
   }
 
   // userscript/ui-main.js
-  var SCRIPT_VERSION = "1.2.5";
+  var SCRIPT_VERSION = "1.2.6";
   var ROOT_ID = "ccs-ld-root";
   var Z = 2147483e3;
   var lastSelectionText = "";
