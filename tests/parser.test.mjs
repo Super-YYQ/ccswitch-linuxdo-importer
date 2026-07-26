@@ -803,3 +803,72 @@ describe('maskKey', () => {
     assert.ok(!m.includes('abcdefghijklmnop'))
   })
 })
+
+describe('labeled key hygiene', () => {
+  it('rejects Chinese placeholder text after key labels', () => {
+    for (const text of [
+      `API Key：请联系群主获取完整密钥后填写\nBase URL ${SYNTH.endpoint}`,
+      `密钥：请自行填写\n地址：${SYNTH.endpoint}`,
+      `key: your-key-here-please\nurl: ${SYNTH.endpoint}`,
+    ]) {
+      const r = parseShareText(text)
+      assert.ok(r, `expected parse for endpoint in: ${text.slice(0, 30)}`)
+      assert.equal(r.endpoint, SYNTH.endpoint)
+      assert.equal(r.apiKey, null, `should not treat prose as key: ${r.apiKey}`)
+    }
+  })
+
+  it('rejects URL values labeled as key', () => {
+    const text = `key：https://evil.example.invalid/steal\nurl：${SYNTH.endpoint}`
+    const r = parseShareText(text)
+    assert.ok(r)
+    assert.equal(r.endpoint, SYNTH.endpoint)
+    assert.ok(
+      r.apiKey == null || r.apiKey === SYNTH.endpoint || !/^https?:\/\//i.test(r.apiKey),
+      `apiKey must not be a URL: ${r.apiKey}`,
+    )
+    // Prefer no key at all over stealing the url as key
+    assert.notEqual(r.apiKey, 'https://evil.example.invalid/steal')
+  })
+})
+
+describe('bare host email peel', () => {
+  it('does not treat email domains as bare API hosts', () => {
+    const text = `admin@mail.example.com\n${SYNTH.g2a}`
+    const r = parseShareText(text)
+    assert.ok(r)
+    assert.equal(r.apiKey, SYNTH.g2a)
+    assert.notEqual(r.endpoint, 'https://example.com')
+    assert.notEqual(r.endpoint, 'https://mail.example.com')
+  })
+
+  it('still accepts genuine bare onebox hosts with keys', () => {
+    const text = `grok2api-v2.onrender.com\n${SYNTH.g2a}`
+    const r = parseShareText(text)
+    assert.ok(r)
+    assert.equal(r.endpoint, 'https://grok2api-v2.onrender.com')
+    assert.equal(r.apiKey, SYNTH.g2a)
+  })
+})
+
+describe('deeplink finalize', () => {
+  it('strips trailing punctuation from deeplink endpoints via finalizeResult', () => {
+    const link = `ccswitch://v1/import?resource=provider&app=claude&name=X&endpoint=${encodeURIComponent(
+      'https://api.example.com/v1.',
+    )}&apiKey=${SYNTH.skAntDeeplink}`
+    const r = parseShareText(link)
+    assert.ok(r)
+    assert.equal(r.source, 'deeplink')
+    assert.equal(r.endpoint, 'https://api.example.com/v1')
+    assert.equal(r.apiKey, SYNTH.skAntDeeplink)
+  })
+
+  it('strips trailing quotes from deeplink endpoints', () => {
+    const link = `ccswitch://v1/import?resource=provider&app=claude&name=X&endpoint=${encodeURIComponent(
+      'https://api.example.com/v1"',
+    )}&apiKey=${SYNTH.skAntDeeplink}`
+    const r = parseShareText(link)
+    assert.ok(r)
+    assert.equal(r.endpoint, 'https://api.example.com/v1')
+  })
+})

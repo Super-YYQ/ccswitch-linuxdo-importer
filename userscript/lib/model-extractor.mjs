@@ -19,16 +19,14 @@
  * @type {RegExp[]}
  */
 const MODEL_RES = [
-  // Claude (longer / more specific first)
+  // Claude (longer / more specific first). Full ids with date or minor:
+  //   claude-sonnet-4-20250514, claude-opus-4-1, claude-haiku-4.5
   /claude-3\.5-sonnet(?:-\d{8})?/gi,
   /claude-3-sonnet(?:-\d{8})?/gi,
   /claude-3\.5-haiku(?:-\d{8})?/gi,
   /claude-3-haiku(?:-\d{8})?/gi,
   /claude-3-opus(?:-\d{8})?/gi,
-  /claude-sonnet-4\.5/gi,
-  /claude-opus-4\.8/gi,
-  /claude-sonnet-4(?!\.\d)/gi,
-  /claude-opus-4(?!\.\d)/gi,
+  /claude-(?:haiku|sonnet|opus)-\d+(?:\.\d+)?(?:-(?:\d{8}|\d{1,2}))?(?![a-z0-9.])/gi,
   /\bclaude-sonnet\b/gi,
   /\bclaude-haiku\b/gi,
   /\bclaude-opus\b/gi,
@@ -71,9 +69,12 @@ export function extractModels(text) {
     return { model: null, haikuModel: null, sonnetModel: null, opusModel: null, models: [] }
   }
 
-  // Mask secrets / long base64 so tokens like "...o3..." inside keys never become models
+  // Mask secrets / long base64 so tokens like "...o3..." inside keys never become models.
+  // Do NOT use a class that includes "-" — that erases real model ids such as
+  // claude-sonnet-4-20250514 (length ≥ 24 with hyphens).
   const scanText = String(text)
-    .replace(/[A-Za-z0-9+/_-]{24,}={0,2}/g, ' ')
+    .replace(/[A-Za-z0-9+/]{24,}={0,2}/g, ' ')
+    .replace(/[A-Za-z0-9_]{32,}={0,2}/g, ' ')
     .replace(/\bsk-(?:ant-)?[A-Za-z0-9_-]{8,}\b/gi, ' ')
     .replace(/\b(?:g2a_|tp-|nk-|pk-|rk-)[A-Za-z0-9_-]{8,}\b/gi, ' ')
 

@@ -39,9 +39,12 @@ const ENV_KEY_KEYS = [
 
 const URL_RE = /https?:\/\/[^\s"'`<>，。；、）)\]}]+/gi
 // Discourse onebox / paste often drops the scheme: grok2api-v2.onrender.com
-// Require a multi-label host + common TLD; reject emails via (?<!@).
+// Require a multi-label host + common TLD.
+// Reject emails and host suffixes peeled from them:
+//   admin@mail.example.com  — (?<!@) alone still matches "example.com" after the dot.
+// Also refuse a match that continues a larger label (prev char is word / "." / "@" / "-").
 const BARE_HOST_RE =
-  /(?<!@)\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:com|net|org|io|dev|app|ai|cc|me|co|info|xyz|top|tech|cloud|run|site|online|pro|page|link|live|tv|us|uk|cn|jp|de|fr|ru|br|in|au|ca|nl|se|no|fi|pl|cz|ch|at|be|es|it|pt|kr|tw|hk|sg|my|id|ph|vn|th|edu|gov)(?:\/[^\s"'`<>，。；、）)\]}]*)?/gi
+  /(?<![@.\w-])(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:com|net|org|io|dev|app|ai|cc|me|co|info|xyz|top|tech|cloud|run|site|online|pro|page|link|live|tv|us|uk|cn|jp|de|fr|ru|br|in|au|ca|nl|se|no|fi|pl|cz|ch|at|be|es|it|pt|kr|tw|hk|sg|my|id|ph|vn|th|edu|gov)(?:\/[^\s"'`<>，。；、）)\]}]*)?/gi
 // Allow short CJK / non-ASCII runs mid-key (linux.do anti-scrape watermarks like
 // 「删掉我」「去除文中」). Lookahead requires the key body to continue in ASCII so
 // trailing Chinese prose is not swallowed. sanitizeApiKey strips the watermark later.
@@ -104,7 +107,8 @@ export function parseShareText(text) {
       if (oversized) {
         fromLink.warnings = [...(fromLink.warnings || []), '选区过大，已截断后再解析']
       }
-      return fromLink
+      // Same cleanUrl / key normalize path as mixed/json/env results
+      return finalizeResult(fromLink, cleaned)
     }
   }
   // Non-provider / malformed: strip all so mixed path cannot harvest apiKey from querystring
@@ -1391,7 +1395,9 @@ function tryParseMixed(text) {
     ...extractLooseKeys(text),
     ...extractBase64DecodedKeys(text),
     ...(labeled.apiKey ? [labeled.apiKey] : []),
-  ]).map((k) => maybeDecodeKey(k))
+  ])
+    .map((k) => maybeDecodeKey(k))
+    .filter((k) => k && (hasKeyPrefix(k) || lookLikeKeyValue(k)))
 
   const apiKeys = unique(keys).slice(0, MAX_KEYS)
 
@@ -1483,10 +1489,13 @@ function buildCandidatePairs(urls, apiKeys, text, labeled) {
       add(urls[i] || urls[0], apiKeys[i] || apiKeys[0])
     }
 
-    // 4) Remaining limited cartesian
-    outer: for (const u of urls) {
-      for (const k of apiKeys) {
-        if (!add(u, k)) break outer
+    // 4) Full cartesian only when proximity+zip left us with almost nothing
+    //    (avoids flooding the UI with crossed URL×key noise).
+    if (pairs.length < 2) {
+      outer: for (const u of urls) {
+        for (const k of apiKeys) {
+          if (!add(u, k)) break outer
+        }
       }
     }
   } else if (urls.length === 0) {
@@ -1661,13 +1670,34 @@ function stripLabeledValue(value) {
   return v.replace(/[，。；、！？]+$/g, '')
 }
 
+/**
+ * Labeled "key：" values must look like real tokens — not Chinese placeholders
+ * ("请联系群主…"), not http(s) URLs, not short English filler ("your-key-here").
+ * Encoded bodies (base64 / hex) and known vendor prefixes stay accepted.
+ */
 function lookLikeKeyValue(v) {
-  return (
-    !!v &&
-    (KEY_PREFIX_BODY_RE.test(v) ||
-      /^[A-Za-z0-9+/_-]{16,}={0,2}$/.test(v) ||
-      v.length >= 12)
-  )
+  if (!v) return false
+  const s = String(v).trim()
+  if (!s || s.length > 512) return false
+  if (/^https?:\/\//i.test(s) || /\s/.test(s)) return false
+  // Real keys may briefly contain CJK watermarks only when they already have a
+  // vendor prefix (sanitizeApiKey strips them later). Placeholder Chinese prose
+  // without a prefix must never become apiKey.
+  if (KEY_PREFIX_BODY_RE.test(s)) {
+    const stripped = s.replace(/[^\x20-\x7E]/g, '')
+    return stripped.length >= 8 && stripped.length <= 512
+  }
+  if (/[^\x20-\x7E]/.test(s)) return false
+  // classic base64 (padding or long alphabet)
+  if (/^[A-Za-z0-9+/]+={1,2}$/.test(s) && s.length >= 20) return true
+  if (/^[A-Za-z0-9+/]{32,}$/.test(s)) return true
+  // url-safe / underscore bodies (no multi-word English filler)
+  if (/^[A-Za-z0-9_-]{32,}={0,2}$/.test(s) && !/(?:your|please|example|xxxx|todo|changeme)/i.test(s)) {
+    return true
+  }
+  // hex-encoded key body
+  if (/^[0-9a-fA-F]{24,}$/.test(s) && s.length % 2 === 0) return true
+  return false
 }
 
 function assignLabeledField(result, kind, value) {
@@ -1681,8 +1711,11 @@ function assignLabeledField(result, kind, value) {
     else return
   } else if (kind === 'key') {
     if (result.apiKey) return
+    const raw = String(value).replace(/\s+/g, '')
+    // Never treat a URL as an apiKey (common mis-label / copy-paste)
+    if (/^https?:\/\//i.test(raw) || !lookLikeKeyValue(raw)) return
     // raw token — finalizeResult runs normalizeApiKey once
-    result.apiKey = String(value).replace(/\s+/g, '')
+    result.apiKey = raw
   } else if (kind === 'name') {
     if (result.name) return
     result.name = String(value).trim()
@@ -1900,8 +1933,11 @@ function extractLooseKeys(text) {
     for (const chunk of afterLabel) {
       const m = chunk.match(/[:：]\s*([A-Za-z0-9+/_-]{20,}={0,2})/)
       if (m) {
-        const decoded = decodeKeyBody(m[1])
-        if (decoded) out.push(decoded)
+        const raw = m[1]
+        // Drop English/CJK placeholders before decode (e.g. your-key-here-please)
+        if (!lookLikeKeyValue(raw) && !KEY_PREFIX_BODY_RE.test(raw)) continue
+        const decoded = decodeKeyBody(raw)
+        if (decoded && (hasKeyPrefix(decoded) || lookLikeKeyValue(decoded))) out.push(decoded)
       }
     }
   }
@@ -1987,9 +2023,16 @@ function cleanUrl(u) {
 function scoreFields(fields, app) {
   let s = 0.3
   if (fields.endpoint) s += 0.35
-  if (fields.apiKey) s += 0.35
+  if (fields.apiKey) {
+    s += 0.35
+    // Weak / non-prefixed tokens should not read as "100% confidence"
+    const k = String(fields.apiKey)
+    if (!KEY_PREFIX_RE.test(k) && !KEY_PREFIX_BODY_RE.test(k)) {
+      s -= 0.25
+    }
+  }
   if (app) s += 0.1
-  return Math.min(1, s)
+  return Math.min(1, Math.max(0, s))
 }
 
 function buildWarnings(fields) {
@@ -1998,6 +2041,14 @@ function buildWarnings(fields) {
   if (!fields.endpoint && fields.apiKey) w.push('未识别到 endpoint/base URL，仍可尝试导入')
   if (fields.endpoint && !/^https?:\/\//i.test(fields.endpoint)) {
     w.push('endpoint 不是 http(s) URL')
+  }
+  if (fields.apiKey) {
+    const k = String(fields.apiKey)
+    if (/^https?:\/\//i.test(k)) {
+      w.push('apiKey 看起来像 URL，请核对')
+    } else if (!KEY_PREFIX_RE.test(k) && !KEY_PREFIX_BODY_RE.test(k) && k.length < 24) {
+      w.push('apiKey 形态较弱，请核对后再导入')
+    }
   }
   return w
 }

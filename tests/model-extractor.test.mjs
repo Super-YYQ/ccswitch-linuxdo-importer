@@ -108,6 +108,20 @@ describe('extractModels', () => {
     assert.ok(r.models.includes('deepseek-v3.2'))
     assert.ok(!r.models.includes('deepseek-v3'), `truncated deepseek: ${r.models}`)
   })
+
+  it('extracts modern Claude 4 ids with date / minor / haiku-4.5', () => {
+    const r = extractModels(
+      'claude-sonnet-4-20250514 claude-opus-4-1 claude-haiku-4.5 claude-haiku-4',
+    )
+    assert.ok(r.models.includes('claude-sonnet-4-20250514'), `models=${r.models}`)
+    assert.ok(r.models.includes('claude-opus-4-1'), `models=${r.models}`)
+    assert.ok(r.models.includes('claude-haiku-4.5'), `models=${r.models}`)
+    assert.ok(r.models.includes('claude-haiku-4'), `models=${r.models}`)
+    assert.ok(!r.models.includes('claude-haiku'), `bare haiku leak: ${r.models}`)
+    assert.ok(!r.models.includes('claude-opus-4'), `short opus leak: ${r.models}`)
+    assert.equal(r.sonnetModel, 'claude-sonnet-4-20250514')
+    assert.equal(r.opusModel, 'claude-opus-4-1')
+  })
 })
 
 describe('filterModelsForApp', () => {
