@@ -58,10 +58,16 @@ const B64_BOUNDARY_R = '(?:$|[\\s"\'`，。；、！？]|(?=[一-鿿]))'
 const BASE64_RE = new RegExp(`${B64_BOUNDARY_L}([A-Za-z0-9+/]{40,}={0,2})${B64_BOUNDARY_R}`, 'g')
 // Accept both ccswitch://... and ccswitch:... (no authority slashes)
 const DEEPLINK_RE = /ccswitch:(?:\/\/)?[^\s"'`<>]+/gi
-// Known API key prefixes (sk-/g2a_/tp- token-plan, plus rare vendor tags)
-const KEY_PREFIX_RE = /^(sk-ant-|sk-|g2a_|tp-|nk-|pk-|rk-)/i
-const KEY_PREFIX_BODY_RE = /^(sk-ant-|sk-|g2a_|tp-|nk-|pk-|rk-|Bearer\s)/i
-const VENDOR_KEY_RE = /\b(?:g2a_|tp-|nk-|pk-|rk-)[A-Za-z0-9_\-]{8,}\b/g
+// Known API key prefixes (sk-/g2a_/tp- token-plan, plus rare vendor tags).
+// ark- = Volcengine 方舟 (ark.cn-beijing.volces.com / api.volcengine.com):
+// base64-shared key decodes to `ark-<uuid>-<suffix>`. Listed here so decoded
+// bodies are accepted as keys and bare ark- tokens light the import button.
+// xai- = xAI Grok; gsk_ = Groq; pplx- = Perplexity; r8_ = Replicate;
+// hf_ = HuggingFace; fw_ = Fireworks. All carry a delimiter (-/_) and are
+// specific enough to avoid false matches (cross-checked vs gitleaks/n8n/pipelock).
+const KEY_PREFIX_RE = /^(sk-ant-|sk-|g2a_|tp-|nk-|pk-|rk-|ark-|xai-|gsk_|pplx-|r8_|hf_|fw_)/i
+const KEY_PREFIX_BODY_RE = /^(sk-ant-|sk-|g2a_|tp-|nk-|pk-|rk-|ark-|xai-|gsk_|pplx-|r8_|hf_|fw_|Bearer\s)/i
+const VENDOR_KEY_RE = /\b(?:g2a_|tp-|nk-|pk-|rk-|ark-|xai-|gsk_|pplx-|r8_|hf_|fw_)[A-Za-z0-9_\-]{8,}\b/g
 
 /**
  * @typedef {'claude'|'codex'|null} AppKind
@@ -448,19 +454,21 @@ export function looksLikeConfig(text) {
     return true
   if (/sk-ant-|sk-[A-Za-z0-9]{16,}/.test(t)) return true
   // Vendor keys (g2a_ Grok2API, tp- token-plan, …) alone are enough to light the button
-  if (VENDOR_KEY_RE.test(t)) return true
-  VENDOR_KEY_RE.lastIndex = 0
+  if (hasVendorKey(t)) return true
   if (/https?:\/\//i.test(t) && /sk-|Bearer\s+/i.test(t)) return true
   // bare host (no scheme) + any known key shape — Discourse onebox paste
-  if (hasBareHost(t) && (/sk-|Bearer\s+/i.test(t) || VENDOR_KEY_RE.test(t))) return true
-  VENDOR_KEY_RE.lastIndex = 0
+  if (hasBareHost(t) && (/sk-|Bearer\s+/i.test(t) || hasVendorKey(t))) return true
   // labeled shares: url： / key： / 密钥： / API Key（...）
   if (
     /(?:url|base[_-]?url|base\s*url|endpoint|key|api[_-]?key|api\s*key|token|密钥|地址|接口)/i.test(
       t,
     )
   ) {
-    if (/https?:\/\//i.test(t) || hasBareHost(t) || /[A-Za-z0-9_+\-/]{16,}/.test(t)) return true
+    if (/https?:\/\//i.test(t) || hasBareHost(t)) return true
+    // Bare-token fallback: require a key-shaped token (lookLikeKeyValue), not any
+    // 16+ alnum run — plain chat ("我没token用了" + emoji短码 like
+    // ":backhand_index_pointing_left:") must not light the button.
+    if (hasKeyShapedToken(t)) return true
   }
   // url + base64-ish token (key often base64-encoded on linux.do)
   if (/https?:\/\//i.test(t) && /[A-Za-z0-9+/]{32,}={0,2}/.test(t)) return true
@@ -477,6 +485,33 @@ export function looksLikeConfig(text) {
 function hasBareHost(text) {
   BARE_HOST_RE.lastIndex = 0
   return BARE_HOST_RE.test(text)
+}
+
+/**
+ * True when text contains a known vendor-prefixed key (g2a_/tp-/ark-/…).
+ * Resets the shared /g regex lastIndex before testing — looksLikeConfig can be
+ * called repeatedly on different selections, and a stray lastIndex from a prior
+ * early-return would otherwise make the same token toggle true/false.
+ * @param {string} text
+ */
+function hasVendorKey(text) {
+  VENDOR_KEY_RE.lastIndex = 0
+  return VENDOR_KEY_RE.test(text)
+}
+
+/**
+ * True when some 16+ alnum token in text is key-shaped (lookLikeKeyValue),
+ * so labeled shares with a real-looking key light the button but plain chat
+ * with a stray long word / emoji shortcode does not.
+ * @param {string} text
+ */
+function hasKeyShapedToken(text) {
+  const re = /[A-Za-z0-9_+\-/]{16,}={0,2}/g
+  let m
+  while ((m = re.exec(text)) !== null) {
+    if (lookLikeKeyValue(m[0])) return true
+  }
+  return false
 }
 
 /**
@@ -534,6 +569,8 @@ function normalizeBareHost(host) {
  * @param {string} text
  */
 function hasUsefulBase64Blob(text) {
+  const hasEndpoint = /https?:\/\//i.test(text)
+  const hasDecodeHint = /(?:base\s*64|64\s*解|解密|解码|加密|自行\s*解)/i.test(text)
   const re = new RegExp(`${B64_BOUNDARY_L}([A-Za-z0-9+/]{40,}={0,2})${B64_BOUNDARY_R}`, 'g')
   let m
   while ((m = re.exec(text)) !== null) {
@@ -544,6 +581,16 @@ function hasUsefulBase64Blob(text) {
       if (!decoded || decoded.length < 8) continue
       const ascii = decoded.replace(/[^\x20-\x7E]/g, '').replace(/\s+/g, '')
       if (KEY_PREFIX_RE.test(ascii) && ascii.length >= 8 && ascii.length <= 512) {
+        return true
+      }
+      // Prefix-less vendor token (StepFun/Mistral) under endpoint+decode-hint context
+      if (
+        hasEndpoint &&
+        hasDecodeHint &&
+        ascii.length >= 24 &&
+        ascii.length <= 512 &&
+        /^[A-Za-z0-9_+-]+$/.test(ascii)
+      ) {
         return true
       }
       if (
@@ -745,6 +792,13 @@ export function classifyApp(text, fields = {}) {
   if (/sk-ant-/.test(key) || /sk-ant-/.test(blob)) claude += 3
   if (/anthropic/.test(blob)) claude += 2
   if (/anthropic_|claude_base|claude_api/.test(blob)) claude += 2
+
+  // Volcengine 方舟 exposes dual-protocol endpoints (Anthropic- + OpenAI-compatible
+  // on the same ark.cn-beijing.volces.com host); classify from endpoint path, not key.
+  if (/ark\.|volcengine|\.volces\.com/i.test(endpoint) || /volces\.com/i.test(blob)) {
+    if (/\/(anthropic|coding)(?!\/v3)/i.test(endpoint)) claude += 2
+    if (/\/v3|openai/i.test(endpoint)) codex += 2
+  }
 
   if (/openai/.test(blob)) codex += 2
   if (/\bcodex\b/.test(blob)) codex += 3
@@ -1628,7 +1682,7 @@ function scorePair(pair, preferredUrl, preferredKey, text, urlLocs, keyLocs) {
   if (pair.apiKey) {
     if (pair.apiKey.startsWith('sk-ant-')) s += 2
     else if (pair.apiKey.startsWith('sk-')) s += 1
-    else if (/^(?:g2a_|tp-)/i.test(pair.apiKey)) s += 1
+    else if (/^(?:g2a_|tp-|ark-|xai-|gsk_|pplx-|r8_|hf_|fw_)/i.test(pair.apiKey)) s += 1
   }
   // slight preference for shorter path endpoints (often the real base)
   if (pair.endpoint) {
@@ -1653,6 +1707,12 @@ const LABEL_ANY_RE =
   /^(url|base\s*url|base[_-]?url|endpoint|api\s*base|api[_-]?base|host|地址|接口|链接|key|api\s*key|api[_-]?key|token|secret|auth[_-]?token|密钥|name|名称|名字)/i
 const LABEL_KEY_PREFIX_RE =
   /^(?:api\s*key|api[_-]?key|key|token|secret|auth[_-]?token|密钥)(?:\s*[（(][^）)]*[）)])?\s*[:：]?\s*/i
+// Looser than LABEL_KEY_PREFIX_RE: matches a line that merely *starts* with a key
+// label word and may carry a trailing descriptor (e.g. "API-Key Base64",
+// "密钥（Base64，请自行解码）"). Used to trigger readFollowingKey for the
+// "label-line + newline + token" two-line shape that the strict prefix+$ test misses.
+const LABEL_KEY_HEAD_RE =
+  /^(?:api\s*key|api[_-]?key|key|token|secret|auth[_-]?token|密钥)(?=\s|\b|[（(])/i
 
 function labelKind(label) {
   const s = String(label || '').toLowerCase().replace(/\s+/g, '')
@@ -1768,6 +1828,17 @@ function extractLabeledFields(text) {
       const v = readFollowingKey(lines, i + 1)
       if (v) assignLabeledField(result, 'key', v)
       continue
+    }
+
+    // Label-line carrying a trailing descriptor ("API-Key Base64", "密钥（Base64）")
+    // followed by a newline + token. Same readFollowingKey path; v == null means the
+    // value is on the same line (handled by glued/labeled below), so do NOT continue.
+    if (LABEL_KEY_HEAD_RE.test(line) && !result.apiKey) {
+      const v = readFollowingKey(lines, i + 1)
+      if (v) {
+        assignLabeledField(result, 'key', v)
+        continue
+      }
     }
 
     const labeled = line.match(
@@ -1949,10 +2020,25 @@ function extractLooseKeys(text) {
  */
 function extractBase64DecodedKeys(text) {
   const out = []
+  // Context gates for accepting prefix-less decoded tokens (StepFun / Mistral /
+  // Cohere style random-string keys): only when the share clearly carries an
+  // endpoint URL AND a base64/decode hint, so arbitrary base64 noise (image
+  // hashes, encoded snippets) is not harvested as keys.
+  const hasEndpoint = /https?:\/\//i.test(text)
+  const hasDecodeHint = /(?:base\s*64|64\s*解|解密|解码|加密|自行\s*解)/i.test(text)
   const consider = (token) => {
     if (!token || token.startsWith('sk-') || token.startsWith('http')) return
     const decoded = decodeKeyBody(token)
-    if (decoded && decoded !== token && hasKeyPrefix(decoded)) out.push(decoded)
+    if (!decoded || decoded === token) return
+    if (hasKeyPrefix(decoded)) {
+      out.push(decoded)
+      return
+    }
+    // Prefix-less vendor token: require endpoint + decode hint + key-like shape,
+    // so a lone base64 blob without context is never mistaken for a key.
+    if (hasEndpoint && hasDecodeHint && lookLikeKeyValue(decoded) && decoded.length >= 24) {
+      out.push(decoded)
+    }
   }
 
   for (const line of text.split(/\r?\n/)) {
@@ -2004,7 +2090,7 @@ function pickBestKey(keys) {
     let s = k.length / 100
     if (k.startsWith('sk-ant-')) s += 3
     else if (k.startsWith('sk-')) s += 2
-    else if (/^(?:g2a_|tp-)/i.test(k)) s += 2
+    else if (/^(?:g2a_|tp-|ark-|xai-|gsk_|pplx-|r8_|hf_|fw_)/i.test(k)) s += 2
     else if (/^[A-Za-z0-9+/]+={1,2}$/.test(k) && k.length >= 24) s += 0.5 // raw b64
     return { k, s }
   })

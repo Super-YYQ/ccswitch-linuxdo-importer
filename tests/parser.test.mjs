@@ -30,6 +30,26 @@ const SYNTH = {
   skWatermarkBody: 'sk-test-only-222222222222222222222222',
   g2a: 'g2a_testonly_not_a_real_token_abcdefghij',
   tp: 'tp-test-only-not-a-real-token-abcdefghij01',
+  // Volcengine 方舟: base64-shared key decodes to ark-<uuid>-<suffix>.
+  // Synthetic body (clearly not a real UUID) so push protection does not flag it.
+  ark: 'ark-testonly-not-a-real-token-abcdefghij0123456789',
+  arkEndpointAnthropic: 'https://ark.cn-beijing.volces.com/api/coding',
+  arkEndpointOpenai: 'https://ark.cn-beijing.volces.com/api/coding/v3',
+  // StepFun 阶跃: prefix-less random-string token, often base64-shared with a
+  // "64解密" hint. Synthetic body (no vendor prefix, 32+ alnum) — never a real key.
+  stepfun: 'testonlynotrealstepfuntokenabcdefghij0123456789abcd',
+  stepfunEndpoint: 'https://api.stepfun.com/step_plan/v1',
+  // Mistral-style prefix-less plaintext key (synthetic, for C-gap + loose-body).
+  mistral: 'testonlynotrealmistraltokenabcdefghij0123456',
+  mistralEndpoint: 'https://api.mistral.ai/v1',
+  // Additional vendor prefixes (xAI / Groq / Perplexity / Replicate).
+  xai: 'xai-testonlynotrealkey0123456789abcdef',
+  xaiEndpoint: 'https://api.x.ai/v1',
+  gsk: 'gsk_testonlynotrealtoken0123456789abcdef',
+  pplx: 'pplx-testonlynotrealtoken0123456789',
+  r8: 'r8_testonlynotrealtoken0123456',
+  hf: 'hf_testonlynotrealtoken0123456789abcdef',
+  fw: 'fw_testonlynotrealtoken0123456789abcdefgh',
   endpoint: 'https://api.example.invalid',
   endpointV1: 'https://api.example.invalid/v1',
   endpointAnthropic: 'https://api.example.invalid/anthropic',
@@ -50,6 +70,23 @@ describe('looksLikeConfig', () => {
     assert.equal(looksLikeConfig('短'), false)
     assert.equal(
       looksLikeConfig('这个帖子只是随便聊聊编程学习经验，没有任何密钥内容在里面哈哈哈哈'),
+      false,
+    )
+  })
+
+  it('rejects plain chat containing the word "token" + emoji shortcode (no config)', () => {
+    // Real linux.do chat: "token" as an everyday word + a long emoji shortcode
+    // (:backhand_index_pointing_left:) — must NOT light the import button.
+    const chat =
+      '“佬，你为什么不搞个玻利维亚的 gptpro 到公益站给我爽爽，我没token 用了。”\n' +
+      '@dingding1 :backhand_index_pointing_left:这是受害者站长\n\n' +
+      '“佬，我没有多少 ldc，能不能送个你站的邀请码给我”'
+    assert.equal(looksLikeConfig(chat), false)
+  })
+
+  it('rejects a lone long English word (no label, no key shape)', () => {
+    assert.equal(
+      looksLikeConfig('我们讨论一下 supercalifragilisticexpialidocious 这个词'),
       false,
     )
   })
@@ -88,6 +125,91 @@ describe('looksLikeConfig', () => {
     assert.equal(
       looksLikeConfig(`grok2api-v2.onrender.com\nGrok2API\n总结\n${key}`),
       true,
+    )
+  })
+
+  it('recognizes Volcengine Ark base64-shared key (decodes to ark-…)', () => {
+    // Real linux.do share shape: key shared as base64, decodes to `ark-<uuid>-<suffix>`.
+    const b64 = base64Encode(SYNTH.ark)
+    assert.equal(looksLikeConfig(`API-Key Base64\n${b64}`), true)
+    const r = parseShareText(
+      [
+        '当前仓库对于 8月1号到期',
+        '',
+        'Base URL',
+        `兼容 Anthropic 接口协议工具：${SYNTH.arkEndpointAnthropic}`,
+        '',
+        `兼容 OpenAI 接口协议工具：${SYNTH.arkEndpointOpenai}`,
+        '',
+        'API-Key Base64',
+        b64,
+      ].join('\n'),
+    )
+    assert.ok(r, 'should parse')
+    assert.equal(r.apiKey, SYNTH.ark)
+    assert.equal(r.endpoint, SYNTH.arkEndpointAnthropic)
+    // Anthropic-compatible path (/coding, not /coding/v3) → Claude
+    assert.equal(r.app, 'claude')
+    assert.equal(Object(r).candidates.length, 2)
+  })
+
+  it('bare ark- vendor token lights the import button', () => {
+    assert.equal(looksLikeConfig(SYNTH.ark), true)
+  })
+
+  it('recognizes xai-/gsk_/pplx-/r8- vendor prefixes', () => {
+    assert.equal(looksLikeConfig(SYNTH.xai), true)
+    assert.equal(looksLikeConfig(SYNTH.gsk), true)
+    assert.equal(looksLikeConfig(SYNTH.pplx), true)
+    assert.equal(looksLikeConfig(SYNTH.r8), true)
+    const r = parseShareText(`endpoint: ${SYNTH.xaiEndpoint}\nkey: ${SYNTH.xai}`)
+    assert.equal(r.apiKey, SYNTH.xai)
+    assert.equal(r.endpoint, SYNTH.xaiEndpoint)
+  })
+
+  it('recognizes hf_ (HuggingFace) and fw_ (Fireworks) prefixes', () => {
+    assert.equal(looksLikeConfig(SYNTH.hf), true)
+    assert.equal(looksLikeConfig(SYNTH.fw), true)
+    const r = parseShareText(`endpoint: https://api.fireworks.ai/inference/v1\nkey: ${SYNTH.fw}`)
+    assert.equal(r.apiKey, SYNTH.fw)
+  })
+})
+
+describe('prefix-less keys & label-line-with-descriptor', () => {
+  it('StepFun: base64 blob + 64解密 hint + endpoint (no prefix, no label)', () => {
+    const b64 = base64Encode(SYNTH.stepfun)
+    const text = `阶跃星辰的token Plan只用了2%，截止今晚11点，大家用力蹬。64解密\n\n${b64}\n\n${SYNTH.stepfunEndpoint}`
+    assert.equal(looksLikeConfig(text), true)
+    const r = parseShareText(text)
+    assert.ok(r, 'should parse')
+    assert.equal(r.apiKey, SYNTH.stepfun)
+    assert.equal(r.endpoint, SYNTH.stepfunEndpoint)
+    // Weak shape (no vendor prefix) -> lowered confidence, warning present
+    assert.ok(r.confidence < 0.9, 'prefix-less key should not read as fully confident')
+  })
+
+  it('Mistral: API-Key Base64 label-line + newline token (prefix-less, C-gap)', () => {
+    const b64 = base64Encode(SYNTH.mistral)
+    const text = `endpoint：${SYNTH.mistralEndpoint}\nAPI-Key Base64\n${b64}`
+    const r = parseShareText(text)
+    assert.ok(r, 'should parse')
+    assert.equal(r.apiKey, SYNTH.mistral)
+    assert.equal(r.endpoint, SYNTH.mistralEndpoint)
+  })
+
+  it('does NOT harvest prefix-less base64 without a decode hint', () => {
+    // endpoint URL + a random base64-ish blob, but no "base64/解密" hint:
+    // must not be mistaken for an API key.
+    const r = parseShareText(
+      `图片缓存地址 https://img.example.invalid/x\nhash: QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU`,
+    )
+    assert.equal(r && r.apiKey, null)
+  })
+
+  it('does NOT light button for prefix-less base64 without endpoint context', () => {
+    assert.equal(
+      looksLikeConfig(`讨论一下 ${'A'.repeat(60)} 这段内容`),
+      false,
     )
   })
 })

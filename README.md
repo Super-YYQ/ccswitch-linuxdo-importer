@@ -21,11 +21,12 @@
 ### 支持的分享格式
 
 1. **官方深链** — `ccswitch://v1/import?...`
-2. **Base64** — 整段配置或单独的 Key（自动解码 `sk-` / `g2a_` / `tp-` 等）
+2. **Base64** — 整段配置或单独的 Key（自动解码 `sk-` / `sk-ant-` / `g2a_` / `tp-` / `ark-` / `xai-` / `gsk_` / `pplx-` / `r8_` / `hf_` / `fw_` 等前缀；无固定前缀的厂商 token 在「base64/64解密」提示 + endpoint 共同出现时也可识别）
 3. **JSON** — `baseUrl` / `endpoint` + `apiKey` 等
 4. **环境变量** — `ANTHROPIC_BASE_URL`、`ANTHROPIC_AUTH_TOKEN`、`OPENAI_*` 等
 5. **TOML / key=value** — `base_url = "..."`、`api_key = "..."`
 6. **混排文本** — 中文说明 + URL + Key（含全角冒号 `url：` / `key：`、表格 `Base URL    https://...`、标签与 Base64 分行）
+7. **火山引擎方舟（Volcengine Ark）** — `ark.cn-beijing.volces.com` 双协议（Anthropic `/api/coding` + OpenAI `/api/coding/v3`）；Key 以 Base64 分享，解码为 `ark-<uuid>-<suffix>`，自动识别并按 endpoint 路径判定 Claude / Codex
 
 ---
 
@@ -41,7 +42,7 @@
    - 或从 [GitHub Releases](https://github.com/Super-YYQ/ccswitch-linuxdo-importer/releases) 下载对应版本的 `.user.js`
 4. 访问 https://linux.do ，在帖子中选中一段配置文字
 
-确认安装版本：打开确认卡后，元信息末尾应显示当前发布版本（例如 **v1.2.6**）。
+确认安装版本：打开确认卡后，元信息末尾应显示当前发布版本（例如 **v1.2.7**）。
 
 > 若你之前从 `main` 安装过旧版：请卸载后按上面的 `release` 链接重装一次，否则自动更新仍会指向已废弃的 main 产物路径。
 
@@ -176,6 +177,12 @@ CI（`main` / PR）只做 test + build，**不会**更新 `release` 分支。
 
 ## 变更摘要
 
+- **v1.2.7** — 通用化 Key 识别，大幅降低对固定前缀的依赖：
+  - **补厂商前缀**（已对照 gitleaks / n8n / pipelock 核实）：`ark-`(火山引擎方舟，双协议按 endpoint 路径判定 Claude `/coding` / Codex `/coding/v3`)、`xai-`(xAI)、`gsk_`(Groq)、`pplx-`(Perplexity)、`r8_`(Replicate)、`hf_`(HuggingFace)、`fw_`(Fireworks)
+  - **修 C 格式 gap**：标签行带描述词(如 `API-Key Base64`)+ 换行 token 的两行格式也能识别
+  - **无前缀厂商 key**：阶跃 / Mistral / Cohere 等无固定前缀 token，当文案含 endpoint URL 且有「base64/64解密/解码」提示时，经「endpoint+提示+key 形态」三重门控识别
+  - **修按钮误报**：聊天里「token」日常用词 + emoji 短码(如 `:backhand_index_pointing_left:`)不再点亮按钮，labeled 分支裸 token 兜底改用 `lookLikeKeyValue` 精判
+  - **修 lastIndex bug**:`VENDOR_KEY_RE` 全局正则命中提前 return 时未重置 `lastIndex`，导致连续选中不同文本时按钮时亮时不亮
 - **v1.2.6** — 标签 Key 不再接受中文占位/URL；裸域名不再从邮箱剥出；Claude 4 完整模型 ID；provider 深链走 finalize 清洗；弱 Key 降置信度
 - **v1.2.5** — 明文 `sk-` Key 中间插入 CJK 水印时完整匹配并剥离
 - **v1.2.4** — 识别 `g2a_`/`tp-` 等 vendor key 亮按钮；Discourse onebox 裸域名（无 `https://`）自动补全为 endpoint
