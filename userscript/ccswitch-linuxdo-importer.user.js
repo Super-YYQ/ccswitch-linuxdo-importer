@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         CC Switch Importer for linux.do
 // @namespace    https://github.com/Super-YYQ/ccswitch-linuxdo-importer
-// @version      1.2.6
+// @version      1.2.7
 // @description  选中 linux.do 分享文本，一键导入 CC Switch（Claude Code / Codex，自动识别模型）
 // @author       CC Switch Importer Contributors
 // @match        https://linux.do/*
@@ -62,9 +62,9 @@
   var B64_BOUNDARY_R = "(?:$|[\\s\"'`\uFF0C\u3002\uFF1B\u3001\uFF01\uFF1F]|(?=[\u4E00-\u9FFF]))";
   var BASE64_RE = new RegExp(`${B64_BOUNDARY_L}([A-Za-z0-9+/]{40,}={0,2})${B64_BOUNDARY_R}`, "g");
   var DEEPLINK_RE = /ccswitch:(?:\/\/)?[^\s"'`<>]+/gi;
-  var KEY_PREFIX_RE = /^(sk-ant-|sk-|g2a_|tp-|nk-|pk-|rk-)/i;
-  var KEY_PREFIX_BODY_RE = /^(sk-ant-|sk-|g2a_|tp-|nk-|pk-|rk-|Bearer\s)/i;
-  var VENDOR_KEY_RE = /\b(?:g2a_|tp-|nk-|pk-|rk-)[A-Za-z0-9_\-]{8,}\b/g;
+  var KEY_PREFIX_RE = /^(sk-ant-|sk-|g2a_|tp-|nk-|pk-|rk-|ark-|xai-|gsk_|pplx-|r8_|hf_|fw_)/i;
+  var KEY_PREFIX_BODY_RE = /^(sk-ant-|sk-|g2a_|tp-|nk-|pk-|rk-|ark-|xai-|gsk_|pplx-|r8_|hf_|fw_|Bearer\s)/i;
+  var VENDOR_KEY_RE = /\b(?:g2a_|tp-|nk-|pk-|rk-|ark-|xai-|gsk_|pplx-|r8_|hf_|fw_)[A-Za-z0-9_\-]{8,}\b/g;
   function parseShareText(text) {
     if (text == null) return null;
     let raw = normalizeShareText(text);
@@ -316,15 +316,14 @@ ${appended.join("\n")}`;
     if (/ANTHROPIC_|OPENAI_|CODEX_|BASE_URL|API_KEY|apiKey|baseUrl|endpoint|Base\s*URL/i.test(t))
       return true;
     if (/sk-ant-|sk-[A-Za-z0-9]{16,}/.test(t)) return true;
-    if (VENDOR_KEY_RE.test(t)) return true;
-    VENDOR_KEY_RE.lastIndex = 0;
+    if (hasVendorKey(t)) return true;
     if (/https?:\/\//i.test(t) && /sk-|Bearer\s+/i.test(t)) return true;
-    if (hasBareHost(t) && (/sk-|Bearer\s+/i.test(t) || VENDOR_KEY_RE.test(t))) return true;
-    VENDOR_KEY_RE.lastIndex = 0;
+    if (hasBareHost(t) && (/sk-|Bearer\s+/i.test(t) || hasVendorKey(t))) return true;
     if (/(?:url|base[_-]?url|base\s*url|endpoint|key|api[_-]?key|api\s*key|token|密钥|地址|接口)/i.test(
       t
     )) {
-      if (/https?:\/\//i.test(t) || hasBareHost(t) || /[A-Za-z0-9_+\-/]{16,}/.test(t)) return true;
+      if (/https?:\/\//i.test(t) || hasBareHost(t)) return true;
+      if (hasKeyShapedToken(t)) return true;
     }
     if (/https?:\/\//i.test(t) && /[A-Za-z0-9+/]{32,}={0,2}/.test(t)) return true;
     if (hasUsefulBase64Blob(t)) return true;
@@ -334,6 +333,18 @@ ${appended.join("\n")}`;
   function hasBareHost(text) {
     BARE_HOST_RE.lastIndex = 0;
     return BARE_HOST_RE.test(text);
+  }
+  function hasVendorKey(text) {
+    VENDOR_KEY_RE.lastIndex = 0;
+    return VENDOR_KEY_RE.test(text);
+  }
+  function hasKeyShapedToken(text) {
+    const re = /[A-Za-z0-9_+\-/]{16,}={0,2}/g;
+    let m;
+    while ((m = re.exec(text)) !== null) {
+      if (lookLikeKeyValue(m[0])) return true;
+    }
+    return false;
   }
   function collectEndpoints(text) {
     const full = matchAll(text, URL_RE).map(cleanUrl).filter((u) => isHttpUrl(u));
@@ -365,6 +376,8 @@ ${appended.join("\n")}`;
     return `https://${h}`;
   }
   function hasUsefulBase64Blob(text) {
+    const hasEndpoint = /https?:\/\//i.test(text);
+    const hasDecodeHint = /(?:base\s*64|64\s*解|解密|解码|加密|自行\s*解)/i.test(text);
     const re = new RegExp(`${B64_BOUNDARY_L}([A-Za-z0-9+/]{40,}={0,2})${B64_BOUNDARY_R}`, "g");
     let m;
     while ((m = re.exec(text)) !== null) {
@@ -375,6 +388,9 @@ ${appended.join("\n")}`;
         if (!decoded || decoded.length < 8) continue;
         const ascii = decoded.replace(/[^\x20-\x7E]/g, "").replace(/\s+/g, "");
         if (KEY_PREFIX_RE.test(ascii) && ascii.length >= 8 && ascii.length <= 512) {
+          return true;
+        }
+        if (hasEndpoint && hasDecodeHint && ascii.length >= 24 && ascii.length <= 512 && /^[A-Za-z0-9_+-]+$/.test(ascii)) {
           return true;
         }
         if (/[{=\n:]/.test(decoded) && (/https?:\/\//.test(decoded) || /API|KEY|BASE|endpoint|baseUrl/i.test(decoded))) {
@@ -498,6 +514,10 @@ ${appended.join("\n")}`;
     if (/sk-ant-/.test(key) || /sk-ant-/.test(blob)) claude += 3;
     if (/anthropic/.test(blob)) claude += 2;
     if (/anthropic_|claude_base|claude_api/.test(blob)) claude += 2;
+    if (/ark\.|volcengine|\.volces\.com/i.test(endpoint) || /volces\.com/i.test(blob)) {
+      if (/\/(anthropic|coding)(?!\/v3)/i.test(endpoint)) claude += 2;
+      if (/\/v3|openai/i.test(endpoint)) codex += 2;
+    }
     if (/openai/.test(blob)) codex += 2;
     if (/\bcodex\b/.test(blob)) codex += 3;
     if (/openai_api_key|openai_base|codex_api|codex_base/.test(blob)) codex += 2;
@@ -1185,7 +1205,7 @@ ${appended.join("\n")}`;
     if (pair.apiKey) {
       if (pair.apiKey.startsWith("sk-ant-")) s += 2;
       else if (pair.apiKey.startsWith("sk-")) s += 1;
-      else if (/^(?:g2a_|tp-)/i.test(pair.apiKey)) s += 1;
+      else if (/^(?:g2a_|tp-|ark-|xai-|gsk_|pplx-|r8_|hf_|fw_)/i.test(pair.apiKey)) s += 1;
     }
     if (pair.endpoint) {
       try {
@@ -1202,6 +1222,7 @@ ${appended.join("\n")}`;
   var LABEL_NAME_RE = /^(?:name|名称|名字)(?:\b|[（(]|$)/i;
   var LABEL_ANY_RE = /^(url|base\s*url|base[_-]?url|endpoint|api\s*base|api[_-]?base|host|地址|接口|链接|key|api\s*key|api[_-]?key|token|secret|auth[_-]?token|密钥|name|名称|名字)/i;
   var LABEL_KEY_PREFIX_RE = /^(?:api\s*key|api[_-]?key|key|token|secret|auth[_-]?token|密钥)(?:\s*[（(][^）)]*[）)])?\s*[:：]?\s*/i;
+  var LABEL_KEY_HEAD_RE = /^(?:api\s*key|api[_-]?key|key|token|secret|auth[_-]?token|密钥)(?=\s|\b|[（(])/i;
   function labelKind(label) {
     const s = String(label || "").toLowerCase().replace(/\s+/g, "");
     if (/url|base|endpoint|host|地址|接口|链接/.test(s)) return "url";
@@ -1290,6 +1311,13 @@ ${appended.join("\n")}`;
         const v = readFollowingKey(lines, i + 1);
         if (v) assignLabeledField(result, "key", v);
         continue;
+      }
+      if (LABEL_KEY_HEAD_RE.test(line) && !result.apiKey) {
+        const v = readFollowingKey(lines, i + 1);
+        if (v) {
+          assignLabeledField(result, "key", v);
+          continue;
+        }
       }
       const labeled = line.match(
         new RegExp(LABEL_ANY_RE.source + "s*(?:[:\uFF1A=]s*|s{2,})(.+)$", "i")
@@ -1419,10 +1447,19 @@ ${appended.join("\n")}`;
   }
   function extractBase64DecodedKeys(text) {
     const out = [];
+    const hasEndpoint = /https?:\/\//i.test(text);
+    const hasDecodeHint = /(?:base\s*64|64\s*解|解密|解码|加密|自行\s*解)/i.test(text);
     const consider = (token) => {
       if (!token || token.startsWith("sk-") || token.startsWith("http")) return;
       const decoded = decodeKeyBody(token);
-      if (decoded && decoded !== token && hasKeyPrefix(decoded)) out.push(decoded);
+      if (!decoded || decoded === token) return;
+      if (hasKeyPrefix(decoded)) {
+        out.push(decoded);
+        return;
+      }
+      if (hasEndpoint && hasDecodeHint && lookLikeKeyValue(decoded) && decoded.length >= 24) {
+        out.push(decoded);
+      }
     };
     for (const line of text.split(/\r?\n/)) {
       const t = line.trim();
@@ -1467,7 +1504,7 @@ ${appended.join("\n")}`;
       let s = k.length / 100;
       if (k.startsWith("sk-ant-")) s += 3;
       else if (k.startsWith("sk-")) s += 2;
-      else if (/^(?:g2a_|tp-)/i.test(k)) s += 2;
+      else if (/^(?:g2a_|tp-|ark-|xai-|gsk_|pplx-|r8_|hf_|fw_)/i.test(k)) s += 2;
       else if (/^[A-Za-z0-9+/]+={1,2}$/.test(k) && k.length >= 24) s += 0.5;
       return { k, s };
     });
@@ -1649,7 +1686,7 @@ ${appended.join("\n")}`;
   }
 
   // userscript/ui-main.js
-  var SCRIPT_VERSION = "1.2.6";
+  var SCRIPT_VERSION = "1.2.7";
   var ROOT_ID = "ccs-ld-root";
   var Z = 2147483e3;
   var lastSelectionText = "";
