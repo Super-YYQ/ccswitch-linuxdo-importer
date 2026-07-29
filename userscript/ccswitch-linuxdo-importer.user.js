@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         CC Switch Importer for linux.do
 // @namespace    https://github.com/Super-YYQ/ccswitch-linuxdo-importer
-// @version      1.2.8
+// @version      1.2.9
 // @description  选中 linux.do 分享文本，一键导入 CC Switch（Claude Code / Codex，自动识别模型）
 // @author       CC Switch Importer Contributors
 // @match        https://linux.do/*
@@ -1359,6 +1359,18 @@ ${appended.join("\n")}`;
     }
     return result;
   }
+  function extractKeyFromWrapper(text) {
+    const t = String(text || "").trim();
+    if (!t || t.length > 1024) return null;
+    const kv = t.match(
+      /["']?[A-Za-z_][A-Za-z0-9_]*["']?\s*[:=]\s*["']([A-Za-z0-9_\-./+=]{8,})["']/
+    );
+    const candidate = kv ? kv[1] : null;
+    if (!candidate) return null;
+    const decoded = hasKeyPrefix(candidate) ? candidate : decodeKeyBody(candidate);
+    if (hasKeyPrefix(decoded)) return sanitizeApiKey(decoded);
+    return null;
+  }
   function decodeKeyBody(value) {
     if (!value) return value;
     let v = String(value).replace(/[\u200B-\u200D\uFEFF\u00AD\u2060]/g, "").replace(/[\s\u00A0]+/g, "").trim();
@@ -1374,7 +1386,12 @@ ${appended.join("\n")}`;
       } catch (e) {
       }
     }
-    return peelBase64Layers(v);
+    const peeled = peelBase64Layers(v);
+    if (!hasKeyPrefix(peeled)) {
+      const unwrapped = extractKeyFromWrapper(peeled);
+      if (unwrapped) return unwrapped;
+    }
+    return peeled;
   }
   function peelBase64Layers(value, maxDepth = 4) {
     let v = String(value || "").trim();
@@ -1393,6 +1410,8 @@ ${appended.join("\n")}`;
       if (hasKeyPrefix(cleaned) && isDecodableKeyBody(cleaned)) {
         return cleaned;
       }
+      const unwrapped = extractKeyFromWrapper(decoded);
+      if (unwrapped) return unwrapped;
       if (isDecodableKeyBody(cleaned) && /^[A-Za-z0-9+/_-]+={0,2}$/.test(cleaned) && cleaned.length >= 16 && cleaned.length < v.length) {
         v = cleaned;
         continue;
@@ -1697,7 +1716,7 @@ ${appended.join("\n")}`;
   }
 
   // userscript/ui-main.js
-  var SCRIPT_VERSION = "1.2.8";
+  var SCRIPT_VERSION = "1.2.9";
   var ROOT_ID = "ccs-ld-root";
   var Z = 2147483e3;
   var lastSelectionText = "";
