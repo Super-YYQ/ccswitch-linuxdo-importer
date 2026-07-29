@@ -214,6 +214,27 @@ describe('prefix-less keys & label-line-with-descriptor', () => {
   })
 })
 
+describe('mergeParseResults · base64 fragment + base_url', () => {
+  it('stitches base64 OPENAI_API_KEY fragment with curly-quoted base_url (no wipe in finalize)', () => {
+    // Real linux.do shape: a base64 blob that decodes only to a JSON-ish key field
+    // (not a full config object), plus a separate base_url = “…” line with curly quotes.
+    // Each half-parser succeeds alone; merge must keep BOTH after finalizeResult.
+    const key = SYNTH.skPlain
+    const b64 = base64Encode(` "OPENAI_API_KEY": "${key}"`)
+    const text = `${b64}\n\nbase_url = “https://ricktoken.example.net”`
+    assert.equal(looksLikeConfig(text), true)
+    const r = parseShareText(text)
+    assert.ok(r, 'should parse')
+    assert.equal(r.apiKey, key)
+    assert.equal(r.endpoint, 'https://ricktoken.example.net')
+    // candidates must stay in sync — otherwise finalizeResult re-applies a key-only
+    // pair and wipes the stitched endpoint
+    assert.ok(r.candidates?.length >= 1)
+    assert.equal(r.candidates[r.candidateIndex || 0].endpoint, 'https://ricktoken.example.net')
+    assert.equal(r.candidates[r.candidateIndex || 0].apiKey, key)
+  })
+})
+
 describe('parseShareText · env', () => {
   it('extracts ANTHROPIC env from Chinese noise', () => {
     const text = `

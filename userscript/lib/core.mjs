@@ -173,6 +173,21 @@ function mergeParseResults(candidates) {
     }
   }
   if (!best.app) best.app = classifyApp('', best)
+  // Keep candidate pairs in sync with the stitched top-level fields. Stale
+  // key-only / endpoint-only pairs would otherwise be re-applied by
+  // finalizeResult and wipe a field merged from a different parser (e.g.
+  // base64 key fragment + env base_url line).
+  if (best.candidates?.length) {
+    const idx = Math.max(0, Math.min(best.candidateIndex || 0, best.candidates.length - 1))
+    best.candidateIndex = idx
+    const current = best.candidates[idx]
+    if (current) {
+      best.candidates[idx] = {
+        endpoint: current.endpoint ?? best.endpoint,
+        apiKey: current.apiKey ?? best.apiKey,
+      }
+    }
+  }
   best.warnings = buildWarnings(best)
   best.confidence = scoreFields(best, best.app)
   return best.endpoint || best.apiKey ? best : null
