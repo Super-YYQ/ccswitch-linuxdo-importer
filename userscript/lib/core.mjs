@@ -1889,6 +1889,28 @@ function extractLabeledFields(text) {
 }
 
 /**
+ * A base64-shared "key" may itself decode to a labeled fragment rather than a
+ * bare token — e.g. ` "OPENAI_API_KEY": "sk-..."` or `api_key=sk-...`. Peel the
+ * wrapper and return the inner key value. Returns null when no key-shaped value
+ * is present (caller keeps the original string).
+ * @param {string} text
+ * @returns {string|null}
+ */
+function extractKeyFromWrapper(text) {
+  const t = String(text || '').trim()
+  if (!t || t.length > 1024) return null
+  // Labeled fragment: "field": "value"  /  'field': 'value'  /  field=value
+  const kv = t.match(
+    /["']?[A-Za-z_][A-Za-z0-9_]*["']?\s*[:=]\s*["']([A-Za-z0-9_\-./+=]{8,})["']/,
+  )
+  const candidate = kv ? kv[1] : null
+  if (!candidate) return null
+  const decoded = hasKeyPrefix(candidate) ? candidate : decodeKeyBody(candidate)
+  if (hasKeyPrefix(decoded)) return sanitizeApiKey(decoded)
+  return null
+}
+
+/**
  * Decode b64/hex + strip CJK watermark; no prefix hints.
  * Supports nested base64 (e.g. "\u4FE9\u6B21base64" \u2192 outer b64 \u2192 inner b64 \u2192 sk-\u2026).
  * Caps depth so random blobs do not loop forever.
@@ -1915,7 +1937,14 @@ function decodeKeyBody(value) {
     }
   }
 
-  return peelBase64Layers(v)
+  const peeled = peelBase64Layers(v)
+  // The peeled result may be a labeled wrapper ("OPENAI_API_KEY": "sk-…") that
+  // itself carries the real key — unwrap it before handing back a non-key string.
+  if (!hasKeyPrefix(peeled)) {
+    const unwrapped = extractKeyFromWrapper(peeled)
+    if (unwrapped) return unwrapped
+  }
+  return peeled
 }
 
 /** Peel nested base64 (e.g. 俩次base64) until sk-/g2a_/tp- or layers stop. */
@@ -1937,6 +1966,11 @@ function peelBase64Layers(value, maxDepth = 4) {
     if (hasKeyPrefix(cleaned) && isDecodableKeyBody(cleaned)) {
       return cleaned
     }
+    // Decoded text may be a labeled fragment ("OPENAI_API_KEY": "sk-…") rather
+    // than a bare key — such text has spaces/quotes, so isDecodableKeyBody is
+    // false and none of the branches below fire. Unwrap the inner key first.
+    const unwrapped = extractKeyFromWrapper(decoded)
+    if (unwrapped) return unwrapped
     // Intermediate pure base64 → peel again
     if (
       isDecodableKeyBody(cleaned) &&

@@ -233,6 +233,40 @@ describe('mergeParseResults · base64 fragment + base_url', () => {
     assert.equal(r.candidates[r.candidateIndex || 0].endpoint, 'https://ricktoken.example.net')
     assert.equal(r.candidates[r.candidateIndex || 0].apiKey, key)
   })
+
+  it('decodes key field value out of base64 JSON fragment behind a key label', () => {
+    // The blob decodes to ` "OPENAI_API_KEY": "sk-..."` — a JSON *fragment*, not a
+    // bare key. Whether bare or behind a `key：` label, the sk- value must be pulled
+    // out, not returned as the raw `"OPENAI_API_KEY": "..."` wrapper string.
+    const key = SYNTH.skPlain
+    const b64 = base64Encode(` "OPENAI_API_KEY": "${key}"`)
+    const variants = [
+      `key ：${b64}\n\nbase_url = “https://ricktoken.example.net”`, // fullwidth label+space (reported)
+      `key：${b64}\nbase_url = “https://ricktoken.example.net”`, // glued fullwidth
+      `key: ${b64}\nbase_url = "https://ricktoken.example.net"`, // ascii
+      `KEY ：${b64}\nbase_url = “https://ricktoken.example.net”`, // uppercase
+      `api_key ：${b64}\nbase_url = “https://ricktoken.example.net”`, // api_key label
+      `key（base64）：${b64}\nbase_url = “https://ricktoken.example.net”`, // CJK note label
+      `这是配置\nkey ：${b64}\n\nbase_url = “https://ricktoken.example.net”\n谢谢`, // prose around
+    ]
+    for (const text of variants) {
+      const r = parseShareText(text)
+      assert.ok(r, `should parse: ${text.slice(0, 40)}…`)
+      assert.equal(r.apiKey, key, `key must be decoded sk- for: ${text.slice(0, 30)}…`)
+      assert.equal(r.endpoint, 'https://ricktoken.example.net', `endpoint for: ${text.slice(0, 30)}…`)
+    }
+  })
+
+  it('decodes various env field names out of a base64 fragment', () => {
+    // The same fragment shape with different field names must all yield the key.
+    const key = SYNTH.skPlain
+    for (const field of ['OPENAI_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'api_key', 'key', 'token']) {
+      const b64 = base64Encode(` "${field}": "${key}"`)
+      const r = parseShareText(`key ：${b64}\nbase_url = "https://ricktoken.example.net"`)
+      assert.ok(r, `field ${field} should parse`)
+      assert.equal(r.apiKey, key, `field ${field}`)
+    }
+  })
 })
 
 describe('parseShareText · env', () => {

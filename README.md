@@ -42,7 +42,7 @@
    - 或从 [GitHub Releases](https://github.com/Super-YYQ/ccswitch-linuxdo-importer/releases) 下载对应版本的 `.user.js`
 4. 访问 https://linux.do ，在帖子中选中一段配置文字
 
-确认安装版本：打开确认卡后，元信息末尾应显示当前发布版本（例如 **v1.2.8**）。
+确认安装版本：打开确认卡后，元信息末尾应显示当前发布版本（例如 **v1.2.9**）。
 
 > 若你之前从 `main` 安装过旧版：请卸载后按上面的 `release` 链接重装一次，否则自动更新仍会指向已废弃的 main 产物路径。
 
@@ -177,6 +177,7 @@ CI（`main` / PR）只做 test + build，**不会**更新 `release` 分支。
 
 ## 变更摘要
 
+- **v1.2.9** — Key 以 base64 分享且解码为 `"OPENAI_API_KEY": "sk-…"` 这类**字段片段**时，从包裹文本中抽出真实 key 值；支持 `key ：` 全角标签 + 独立 `base_url` 行、ascii/大写/`api_key`/中文备注标签等变体；随机 base64 噪声不误判
 - **v1.2.8** — 修复跨解析器拼接丢字段：base64 只含 `OPENAI_API_KEY` 字段、endpoint 在另一行（如 `base_url = “…”`）时，合并结果被旧候选覆盖导致 endpoint 丢失；现在候选对与顶层字段保持同步
 - **v1.2.7** — 通用化 Key 识别，大幅降低对固定前缀的依赖：
   - **补厂商前缀**（已对照 gitleaks / n8n / pipelock 核实）：`ark-`(火山引擎方舟，双协议按 endpoint 路径判定 Claude `/coding` / Codex `/coding/v3`)、`xai-`(xAI)、`gsk_`(Groq)、`pplx-`(Perplexity)、`r8_`(Replicate)、`hf_`(HuggingFace)、`fw_`(Fireworks)
