@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         CC Switch Importer for linux.do
 // @namespace    https://github.com/Super-YYQ/ccswitch-linuxdo-importer
-// @version      1.2.7
+// @version      1.2.8
 // @description  选中 linux.do 分享文本，一键导入 CC Switch（Claude Code / Codex，自动识别模型）
 // @author       CC Switch Importer Contributors
 // @match        https://linux.do/*
@@ -96,7 +96,7 @@
     return result;
   }
   function mergeParseResults(candidates) {
-    var _a, _b;
+    var _a, _b, _c, _d, _e;
     const list = candidates.filter(Boolean);
     if (list.length === 0) return null;
     const complete = list.filter((r) => r.endpoint && r.apiKey).sort((a, b) => (b.confidence || 0) - (a.confidence || 0));
@@ -122,6 +122,17 @@
       }
     }
     if (!best.app) best.app = classifyApp("", best);
+    if ((_c = best.candidates) == null ? void 0 : _c.length) {
+      const idx = Math.max(0, Math.min(best.candidateIndex || 0, best.candidates.length - 1));
+      best.candidateIndex = idx;
+      const current = best.candidates[idx];
+      if (current) {
+        best.candidates[idx] = {
+          endpoint: (_d = current.endpoint) != null ? _d : best.endpoint,
+          apiKey: (_e = current.apiKey) != null ? _e : best.apiKey
+        };
+      }
+    }
     best.warnings = buildWarnings(best);
     best.confidence = scoreFields(best, best.app);
     return best.endpoint || best.apiKey ? best : null;
@@ -1686,7 +1697,7 @@ ${appended.join("\n")}`;
   }
 
   // userscript/ui-main.js
-  var SCRIPT_VERSION = "1.2.7";
+  var SCRIPT_VERSION = "1.2.8";
   var ROOT_ID = "ccs-ld-root";
   var Z = 2147483e3;
   var lastSelectionText = "";
