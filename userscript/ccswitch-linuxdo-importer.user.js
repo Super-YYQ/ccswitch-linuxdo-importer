@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         CC Switch Importer for linux.do
 // @namespace    https://github.com/Super-YYQ/ccswitch-linuxdo-importer
-// @version      1.2.9
+// @version      1.2.10
 // @description  选中 linux.do 分享文本，一键导入 CC Switch（Claude Code / Codex，自动识别模型）
 // @author       CC Switch Importer Contributors
 // @match        https://linux.do/*
@@ -29,6 +29,10 @@
   var MAX_URLS = 8;
   var MAX_KEYS = 8;
   var MAX_CANDIDATES = 12;
+  var MAX_CONFIG_DEPTH = 12;
+  var MAX_CONFIG_FIELDS = 256;
+  var SELECTION_OMISSION_MARKER = "\n\n[\u9009\u533A\u4E2D\u95F4\u5185\u5BB9\u5DF2\u7701\u7565]\n\n";
+  var OVERSIZED_SELECTION_WARNING = "\u9009\u533A\u8FC7\u5927\uFF0C\u5DF2\u53D6\u5F00\u5934\u548C\u7ED3\u5C3E\u7247\u6BB5\u89E3\u6790\uFF1B\u4E2D\u95F4\u5185\u5BB9\u5DF2\u7701\u7565";
   var ENV_URL_KEYS = [
     "ANTHROPIC_BASE_URL",
     "ANTHROPIC_API_BASE",
@@ -52,6 +56,24 @@
     "AUTH_TOKEN",
     "TOKEN"
   ];
+  var RISKY_ENV_NAMES = /* @__PURE__ */ new Set([
+    "NODE_OPTIONS",
+    "BASH_ENV",
+    "ENV",
+    "LD_PRELOAD",
+    "LD_LIBRARY_PATH",
+    "DYLD_INSERT_LIBRARIES",
+    "DYLD_LIBRARY_PATH",
+    "PATH",
+    "PATHEXT",
+    "PYTHONPATH",
+    "NODE_PATH",
+    "CLASSPATH",
+    "SHELL",
+    "COMSPEC",
+    "PROMPT_COMMAND",
+    "GIT_SSH_COMMAND"
+  ]);
   var URL_RE = /https?:\/\/[^\s"'`<>，。；、）)\]}]+/gi;
   var BARE_HOST_RE = /(?<![@.\w-])(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:com|net|org|io|dev|app|ai|cc|me|co|info|xyz|top|tech|cloud|run|site|online|pro|page|link|live|tv|us|uk|cn|jp|de|fr|ru|br|in|au|ca|nl|se|no|fi|pl|cz|ch|at|be|es|it|pt|kr|tw|hk|sg|my|id|ph|vn|th|edu|gov)(?:\/[^\s"'`<>，。；、）)\]}]*)?/gi;
   var SK_KEY_BODY = "(?:[A-Za-z0-9_\\-]|[^\\x00-\\x7F]{1,12}(?=[A-Za-z0-9_\\-]))";
@@ -62,6 +84,37 @@
   var B64_BOUNDARY_R = "(?:$|[\\s\"'`\uFF0C\u3002\uFF1B\u3001\uFF01\uFF1F]|(?=[\u4E00-\u9FFF]))";
   var BASE64_RE = new RegExp(`${B64_BOUNDARY_L}([A-Za-z0-9+/]{40,}={0,2})${B64_BOUNDARY_R}`, "g");
   var DEEPLINK_RE = /ccswitch:(?:\/\/)?[^\s"'`<>]+/gi;
+  var SAFE_PROVIDER_PARAM_NAMES = /* @__PURE__ */ new Set([
+    "homepage",
+    "model",
+    "haikuModel",
+    "sonnetModel",
+    "opusModel",
+    "notes",
+    "icon",
+    "enabled"
+  ]);
+  var RISKY_PROVIDER_PARAM_NAMES = /* @__PURE__ */ new Set([
+    "configUrl",
+    "usageScript",
+    "usageEnabled",
+    "usageApiKey",
+    "usageBaseUrl",
+    "usageAccessToken",
+    "usageUserId",
+    "usageAutoInterval"
+  ]);
+  var CONSUMED_PROVIDER_PARAM_NAMES = /* @__PURE__ */ new Set([
+    "resource",
+    "app",
+    "name",
+    "endpoint",
+    "baseUrl",
+    "apiKey",
+    "api_key",
+    "config",
+    "configFormat"
+  ]);
   var KEY_PREFIX_RE = /^(sk-ant-|sk-|g2a_|tp-|nk-|pk-|rk-|ark-|xai-|gsk_|pplx-|r8_|hf_|fw_)/i;
   var KEY_PREFIX_BODY_RE = /^(sk-ant-|sk-|g2a_|tp-|nk-|pk-|rk-|ark-|xai-|gsk_|pplx-|r8_|hf_|fw_|Bearer\s)/i;
   var VENDOR_KEY_RE = /\b(?:g2a_|tp-|nk-|pk-|rk-|ark-|xai-|gsk_|pplx-|r8_|hf_|fw_)[A-Za-z0-9_\-]{8,}\b/g;
@@ -69,8 +122,9 @@
     if (text == null) return null;
     let raw = normalizeShareText(text);
     if (raw.length < MIN_SELECTION_LEN) return null;
-    const oversized = raw.length > MAX_SELECTION_LEN;
-    if (oversized) raw = raw.slice(0, MAX_SELECTION_LEN);
+    const sampled = sampleSelection(raw);
+    raw = sampled.text;
+    const oversized = sampled.oversized;
     let cleaned = repairBrokenBase64(stripMarkdownFences(raw));
     const deeplinks = extractDeeplinks(cleaned);
     for (const deep of deeplinks) {
@@ -78,7 +132,7 @@
       if (fromLink) {
         fromLink.deeplink = deep;
         if (oversized) {
-          fromLink.warnings = [...fromLink.warnings || [], "\u9009\u533A\u8FC7\u5927\uFF0C\u5DF2\u622A\u65AD\u540E\u518D\u89E3\u6790"];
+          fromLink.warnings = [...fromLink.warnings || [], OVERSIZED_SELECTION_WARNING];
         }
         return finalizeResult(fromLink, cleaned);
       }
@@ -91,7 +145,7 @@
     const mixed = tryParseMixed(cleaned);
     const result = finalizeResult(mergeParseResults([b64, json, toml, env, mixed]), cleaned);
     if (result && oversized) {
-      result.warnings = [...result.warnings || [], "\u9009\u533A\u8FC7\u5927\uFF0C\u5DF2\u622A\u65AD\u540E\u518D\u89E3\u6790"];
+      result.warnings = [...result.warnings || [], OVERSIZED_SELECTION_WARNING];
     }
     return result;
   }
@@ -286,6 +340,9 @@ ${appended.join("\n")}`;
     if (typeof result.confidence === "number") {
       result.confidence = Math.min(1, Math.max(0, result.confidence));
     }
+    result.warnings = Array.from(
+      /* @__PURE__ */ new Set([...result.warnings || [], ...buildWarnings(result)])
+    );
     return result;
   }
   function detectKeyPrefixHint(text) {
@@ -319,8 +376,8 @@ ${appended.join("\n")}`;
   }
   function looksLikeConfig(text) {
     if (!text || text.trim().length < MIN_SELECTION_LEN) return false;
-    let t = repairBrokenBase64(normalizeShareText(text));
-    if (t.length > MAX_SELECTION_LEN) t = t.slice(0, MAX_SELECTION_LEN);
+    const sampled = sampleSelection(normalizeShareText(text));
+    let t = repairBrokenBase64(sampled.text);
     const deeplinks = extractDeeplinks(t);
     if (deeplinks.some((d) => Boolean(parseDeeplink(d)))) return true;
     if (deeplinks.length) t = stripAllDeeplinks(t);
@@ -338,7 +395,10 @@ ${appended.join("\n")}`;
     }
     if (/https?:\/\//i.test(t) && /[A-Za-z0-9+/]{32,}={0,2}/.test(t)) return true;
     if (hasUsefulBase64Blob(t)) return true;
-    if (/\{[\s\S]*"(?:apiKey|api_key|baseUrl|endpoint|base_url)"[\s\S]*\}/.test(t)) return true;
+    if (t.includes("{") && t.includes("}") && /"(?:apiKey|api_key|baseUrl|endpoint|base_url)"\s*:/.test(t)) {
+      return true;
+    }
+    if (sampled.oversized) return true;
     return false;
   }
   function hasBareHost(text) {
@@ -414,9 +474,16 @@ ${appended.join("\n")}`;
   }
   var MAX_DEEPLINK_LEN = 8e3;
   function buildDeeplink(result, appOverride, modelInfo, options) {
+    if (result.unsupportedApp) {
+      throw new Error(`\u4E0D\u652F\u6301\u5C06 ${result.unsupportedApp} provider \u6539\u5199\u4E3A Claude Code \u6216 Codex`);
+    }
     const app = appOverride || result.app;
     if (!app) {
       throw new Error("app is required (claude or codex)");
+    }
+    const endpointPolicy = inspectEndpoint(result.endpoint);
+    if (!endpointPolicy.valid) {
+      throw new Error(`endpoint \u5DF2\u963B\u6B62\uFF1A${endpointPolicy.error}`);
     }
     const params = new URLSearchParams();
     params.set("resource", "provider");
@@ -424,7 +491,14 @@ ${appended.join("\n")}`;
     params.set("name", result.name || defaultName());
     if (result.endpoint) params.set("endpoint", result.endpoint);
     if (result.apiKey) params.set("apiKey", result.apiKey);
-    const includeConfig = !options || options.includeConfig !== false;
+    if (result.providerParams && typeof result.providerParams === "object") {
+      for (const [name, value] of Object.entries(result.providerParams)) {
+        if (value != null && (SAFE_PROVIDER_PARAM_NAMES.has(name) || (options == null ? void 0 : options.includeRiskyParams) === true)) {
+          params.set(name, String(value));
+        }
+      }
+    }
+    const includeConfig = options && Object.prototype.hasOwnProperty.call(options, "includeConfig") ? options.includeConfig !== false : shouldIncludeFullConfigByDefault(result.config);
     if (includeConfig && result.config) {
       params.set("config", base64Encode(result.config));
       params.set("configFormat", result.configFormat || "json");
@@ -437,7 +511,36 @@ ${appended.join("\n")}`;
         if (modelInfo.opusModel) params.set("opusModel", modelInfo.opusModel);
       }
     }
-    return `ccswitch://v1/import?${params.toString()}`;
+    const deeplink = `ccswitch://v1/import?${params.toString()}`;
+    if (deeplink.length > MAX_DEEPLINK_LEN) {
+      const error = new Error(
+        `\u6DF1\u94FE\u8FC7\u957F\uFF08${deeplink.length} \u5B57\u7B26\uFF0C\u5B89\u5168\u4E0A\u9650 ${MAX_DEEPLINK_LEN}\uFF09\uFF1B\u8BF7\u7F29\u77ED\u5B57\u6BB5\u6216\u53D6\u6D88\u643A\u5E26\u5B8C\u6574/\u98CE\u9669\u914D\u7F6E`
+      );
+      error.code = "DEEPLINK_TOO_LONG";
+      error.length = deeplink.length;
+      throw error;
+    }
+    return deeplink;
+  }
+  function describeProviderParams(providerParams) {
+    if (!providerParams || typeof providerParams !== "object") return null;
+    const fields = Object.keys(providerParams);
+    const safeFields = fields.filter((name) => SAFE_PROVIDER_PARAM_NAMES.has(name));
+    const riskyFields = fields.filter((name) => RISKY_PROVIDER_PARAM_NAMES.has(name));
+    const unknownFields = fields.filter(
+      (name) => !SAFE_PROVIDER_PARAM_NAMES.has(name) && !RISKY_PROVIDER_PARAM_NAMES.has(name)
+    );
+    const riskReasons = [];
+    if (riskyFields.length) riskReasons.push(`\u9AD8\u98CE\u9669\u6DF1\u94FE\u53C2\u6570\uFF1A${riskyFields.join("\u3001")}`);
+    if (unknownFields.length) riskReasons.push(`\u672A\u77E5\u6DF1\u94FE\u53C2\u6570\uFF1A${unknownFields.join("\u3001")}`);
+    return {
+      fields,
+      safeFields,
+      riskyFields,
+      unknownFields,
+      risky: riskReasons.length > 0,
+      riskReasons
+    };
   }
   function describeConfigPayload(config) {
     if (!config) return null;
@@ -450,20 +553,15 @@ ${appended.join("\n")}`;
       const obj = JSON.parse(raw);
       if (obj && typeof obj === "object" && !Array.isArray(obj)) {
         fields = Object.keys(obj);
-        if (obj.env && typeof obj.env === "object" && !Array.isArray(obj.env)) {
-          envFields = Object.keys(obj.env);
-        }
-        const riskyNames = fields.filter((k) => isRiskyConfigFieldName(k));
-        if (riskyNames.length) {
-          riskReasons.push(`\u9AD8\u98CE\u9669\u5B57\u6BB5\uFF1A${riskyNames.slice(0, 6).join("\u3001")}`);
-        }
-        const unknown = fields.filter((k) => !isKnownConfigFieldName(k));
-        if (unknown.length >= 4) {
-          riskReasons.push(`\u8F83\u591A\u672A\u77E5\u9644\u52A0\u5B57\u6BB5\uFF08${unknown.length}\uFF09`);
-        }
+        const inspection = inspectConfigObject(obj);
+        envFields = inspection.envFields;
+        riskReasons.push(...inspection.riskReasons);
+      } else {
+        riskReasons.push("\u914D\u7F6E\u6839\u8282\u70B9\u4E0D\u662F\u666E\u901A JSON \u5BF9\u8C61");
       }
     } catch (e) {
       fields = [];
+      riskReasons.push("\u914D\u7F6E\u4E0D\u662F\u53EF\u89E3\u6790\u7684 JSON");
     }
     return {
       fields,
@@ -475,32 +573,135 @@ ${appended.join("\n")}`;
   }
   var KNOWN_CONFIG_FIELDS = /* @__PURE__ */ new Set([
     "env",
+    "environment",
+    "settings",
     "name",
+    "title",
+    "label",
+    "provider",
+    "providername",
+    "_type",
+    "type",
     "baseUrl",
+    "baseURL",
     "base_url",
+    "apiBase",
+    "api_base",
     "endpoint",
+    "url",
+    "host",
     "apiKey",
     "api_key",
+    "key",
+    "token",
     "authToken",
     "auth_token",
     "model",
     "models",
+    "haikuModel",
+    "sonnetModel",
+    "opusModel",
+    "homepage",
     "websiteUrl",
     "website_url",
     "notes",
-    "icon"
+    "icon",
+    "enabled",
+    "usageEnabled",
+    "usageAutoInterval"
   ]);
+  var KNOWN_CONFIG_FIELDS_LOWER = new Set(
+    Array.from(KNOWN_CONFIG_FIELDS, (name) => name.toLowerCase())
+  );
   function isKnownConfigFieldName(name) {
-    return KNOWN_CONFIG_FIELDS.has(String(name || ""));
+    return KNOWN_CONFIG_FIELDS_LOWER.has(String(name || "").toLowerCase());
   }
   function isRiskyConfigFieldName(name) {
     const k = String(name || "");
-    if (/usageScript|usage_script|usageAccessToken|usage_access_token/i.test(k)) return true;
+    if (/usageScript|usage_script|usageApiKey|usage_api_key|usageBaseUrl|usage_base_url|usageAccessToken|usage_access_token|usageUserId|usage_user_id/i.test(
+      k
+    )) {
+      return true;
+    }
+    if (/configUrl|config_url|remote|download|fetch/i.test(k)) return true;
     if (/script|command|hook|eval|exec/i.test(k)) return true;
+    if (/^(?:path|pythonpath|node_path|classpath|library_path)$/i.test(k)) return true;
     if (/access.?token|password|secret|private.?key/i.test(k) && !/^api[_-]?key$/i.test(k)) {
       return true;
     }
     return false;
+  }
+  function isKnownProviderEnvName(name) {
+    const k = String(name || "").toUpperCase();
+    if (ENV_URL_KEYS.includes(k) || ENV_KEY_KEYS.includes(k)) return true;
+    if (/^(?:ANTHROPIC|CLAUDE|OPENAI|CODEX)_(?:DEFAULT_)?(?:HAIKU_|SONNET_|OPUS_)?MODEL$/.test(k)) {
+      return true;
+    }
+    return /^(?:ANTHROPIC|CLAUDE|OPENAI|CODEX)_(?:BASE_URL|API_BASE|API_BASE_URL|API_KEY|AUTH_TOKEN|API_TOKEN|MODEL)$/.test(
+      k
+    );
+  }
+  function isRiskyEnvName(name) {
+    const k = String(name || "").toUpperCase();
+    if (RISKY_ENV_NAMES.has(k)) return true;
+    return /(?:^|_)(?:SCRIPT|COMMAND|HOOK|EVAL|EXEC|PRELOAD|STARTUP|SHELL|PATH)(?:_|$)/.test(k);
+  }
+  function inspectConfigObject(root) {
+    const envFields = /* @__PURE__ */ new Set();
+    const riskyFields = /* @__PURE__ */ new Set();
+    const unknownFields = /* @__PURE__ */ new Set();
+    const riskyEnvFields = /* @__PURE__ */ new Set();
+    const unknownEnvFields = /* @__PURE__ */ new Set();
+    let fieldCount = 0;
+    let depthExceeded = false;
+    let fieldCountExceeded = false;
+    const visit = (value, depth, envContext) => {
+      if (!value || typeof value !== "object") return;
+      if (depth > MAX_CONFIG_DEPTH) {
+        depthExceeded = true;
+        return;
+      }
+      if (Array.isArray(value)) {
+        for (const item of value) visit(item, depth + 1, envContext);
+        return;
+      }
+      for (const [name, child] of Object.entries(value)) {
+        fieldCount++;
+        if (fieldCount > MAX_CONFIG_FIELDS) {
+          fieldCountExceeded = true;
+          return;
+        }
+        if (envContext) {
+          envFields.add(name);
+          if (isRiskyEnvName(name)) riskyEnvFields.add(name);
+          else if (!isKnownProviderEnvName(name)) unknownEnvFields.add(name);
+        } else if (isRiskyConfigFieldName(name)) {
+          riskyFields.add(name);
+        } else if (!isKnownConfigFieldName(name)) {
+          unknownFields.add(name);
+        }
+        const childIsEnv = /^(?:env|environment)$/i.test(name);
+        visit(child, depth + 1, envContext || childIsEnv);
+        if (fieldCountExceeded) return;
+      }
+    };
+    visit(root, 0, false);
+    const riskReasons = [];
+    if (riskyFields.size) {
+      riskReasons.push(`\u9AD8\u98CE\u9669\u5B57\u6BB5\uFF1A${Array.from(riskyFields).slice(0, 8).join("\u3001")}`);
+    }
+    if (unknownFields.size) {
+      riskReasons.push(`\u672A\u77E5\u914D\u7F6E\u5B57\u6BB5\uFF1A${Array.from(unknownFields).slice(0, 8).join("\u3001")}`);
+    }
+    if (riskyEnvFields.size) {
+      riskReasons.push(`\u9AD8\u98CE\u9669\u73AF\u5883\u53D8\u91CF\uFF1A${Array.from(riskyEnvFields).slice(0, 8).join("\u3001")}`);
+    }
+    if (unknownEnvFields.size) {
+      riskReasons.push(`\u672A\u77E5\u73AF\u5883\u53D8\u91CF\uFF1A${Array.from(unknownEnvFields).slice(0, 8).join("\u3001")}`);
+    }
+    if (depthExceeded) riskReasons.push(`\u914D\u7F6E\u5D4C\u5957\u8D85\u8FC7\u5B89\u5168\u6DF1\u5EA6 ${MAX_CONFIG_DEPTH}`);
+    if (fieldCountExceeded) riskReasons.push(`\u914D\u7F6E\u5B57\u6BB5\u8D85\u8FC7\u5B89\u5168\u4E0A\u9650 ${MAX_CONFIG_FIELDS}`);
+    return { envFields: Array.from(envFields), riskReasons };
   }
   function shouldIncludeFullConfigByDefault(config) {
     if (!config) return false;
@@ -518,10 +719,14 @@ ${appended.join("\n")}`;
     const endpoint = String(fields.endpoint || "").toLowerCase();
     const name = String(fields.name || "").toLowerCase();
     const config = String(fields.config || "").toLowerCase();
-    const prose = stripModelTokens(String(text || "").toLowerCase());
-    const blob = [prose, endpoint, key, name, config].join("\n");
+    const rawSignals = `${String(text || "")}
+${config}`;
+    const prose = stripModelTokens(stripStructuredEnvNames(String(text || "").toLowerCase()));
+    const blob = [prose, endpoint, key, name, stripStructuredEnvNames(config)].join("\n");
     let claude = 0;
     let codex = 0;
+    if (/\b(?:ANTHROPIC|CLAUDE)_[A-Z0-9_]+\b/i.test(rawSignals)) claude += 2;
+    if (/\b(?:OPENAI|CODEX)_[A-Z0-9_]+\b/i.test(rawSignals)) codex += 2;
     if (/sk-ant-/.test(key) || /sk-ant-/.test(blob)) claude += 3;
     if (/anthropic/.test(blob)) claude += 2;
     if (/anthropic_|claude_base|claude_api/.test(blob)) claude += 2;
@@ -587,6 +792,8 @@ ${appended.join("\n")}`;
       candidates: [],
       warnings: [],
       deeplink: null,
+      providerParams: null,
+      unsupportedApp: null,
       ...partial
     };
   }
@@ -616,10 +823,18 @@ ${appended.join("\n")}`;
       const params = new URLSearchParams(qs);
       const resource = params.get("resource");
       if (resource !== "provider") return null;
-      const app = normalizeApp(params.get("app"));
+      const rawApp = params.get("app");
+      const app = normalizeApp(rawApp);
+      const unsupportedApp = rawApp && !app ? rawApp : null;
       const name = params.get("name") || defaultName();
       const endpoint = params.get("endpoint") || params.get("baseUrl") || null;
       const apiKey = params.get("apiKey") || params.get("api_key") || null;
+      const providerParams = /* @__PURE__ */ Object.create(null);
+      for (const [paramName, value] of params) {
+        if (!CONSUMED_PROVIDER_PARAM_NAMES.has(paramName)) {
+          providerParams[paramName] = value;
+        }
+      }
       let config = null;
       let configFormat = null;
       const configB64 = params.get("config");
@@ -636,10 +851,12 @@ ${appended.join("\n")}`;
       return emptyResult({
         name,
         app,
+        unsupportedApp,
         endpoint,
         apiKey,
         config,
         configFormat,
+        providerParams: Object.keys(providerParams).length ? providerParams : null,
         source: "deeplink",
         confidence
       });
@@ -738,7 +955,7 @@ ${appended.join("\n")}`;
   }
   function extractJsonishFields(text) {
     const result = { endpoint: null, apiKey: null, name: null, hit: false };
-    if (!/\{[\s\S]*["'](?:key|apiKey|api_key|url|baseUrl|base_url|endpoint)["']\s*:/i.test(text)) {
+    if (!text.includes("{") || !/["'](?:key|apiKey|api_key|url|baseUrl|base_url|endpoint)["']\s*:/i.test(text)) {
       return result;
     }
     const urlField = text.match(
@@ -764,46 +981,99 @@ ${appended.join("\n")}`;
     return result;
   }
   function extractJsonObjects(text) {
-    const results = [];
     const limit = Math.min(text.length, MAX_SELECTION_LEN);
+    const stack = [];
+    const pairs = [];
+    let inStr = false;
+    let esc = false;
     for (let i = 0; i < limit; i++) {
-      if (text[i] !== "{") continue;
-      if (results.length >= MAX_JSON_OBJECTS) break;
-      let depth = 0;
-      let inStr = false;
-      let esc = false;
-      const end = Math.min(limit, i + MAX_DECODED_LEN);
-      for (let j = i; j < end; j++) {
-        const c = text[j];
-        if (inStr) {
-          if (esc) {
-            esc = false;
-          } else if (c === "\\") {
-            esc = true;
-          } else if (c === '"') {
-            inStr = false;
-          }
-          continue;
+      const c = text[i];
+      if (inStr) {
+        if (esc) {
+          esc = false;
+        } else if (c === "\\") {
+          esc = true;
+        } else if (c === '"') {
+          inStr = false;
+        } else if (c === "\n" || c === "\r") {
+          inStr = false;
         }
-        if (c === '"') {
-          inStr = true;
-          continue;
-        }
-        if (c === "{") depth++;
-        else if (c === "}") {
-          depth--;
-          if (depth === 0) {
-            results.push(text.slice(i, j + 1));
-            i = j;
-            break;
-          }
+        continue;
+      }
+      if (c === '"' && stack.length > 0) {
+        inStr = true;
+        continue;
+      }
+      if (c === "{") {
+        stack.push(i);
+      } else if (c === "}" && stack.length > 0) {
+        const start = stack.pop();
+        if (i - start + 1 <= MAX_DECODED_LEN) {
+          pairs.push({ start, end: i + 1 });
         }
       }
     }
-    return results;
+    const maximalReversed = [];
+    let currentOuter = null;
+    for (let i = pairs.length - 1; i >= 0; i--) {
+      const pair = pairs[i];
+      if (!currentOuter || pair.end <= currentOuter.start) {
+        maximalReversed.push(pair);
+        currentOuter = pair;
+      }
+    }
+    return maximalReversed.reverse().slice(0, MAX_JSON_OBJECTS).map((pair) => text.slice(pair.start, pair.end));
+  }
+  function stripStructuredEnvNames(s) {
+    return String(s || "").replace(/\b(?:ANTHROPIC|CLAUDE|OPENAI|CODEX)_[A-Z0-9_]+\b/gi, " ");
+  }
+  function sampleSelection(text) {
+    const raw = String(text || "");
+    if (raw.length <= MAX_SELECTION_LEN) return { text: raw, oversized: false };
+    const contentBudget = MAX_SELECTION_LEN - SELECTION_OMISSION_MARKER.length;
+    const headLength = Math.ceil(contentBudget / 2);
+    const tailLength = contentBudget - headLength;
+    return {
+      text: raw.slice(0, headLength) + SELECTION_OMISSION_MARKER + raw.slice(raw.length - tailLength),
+      oversized: true
+    };
   }
   function isHttpUrl(value) {
     return typeof value === "string" && /^https?:\/\//i.test(value.trim());
+  }
+  function inspectEndpoint(value) {
+    if (value == null || String(value).trim() === "") {
+      return { valid: true, warning: null, error: null };
+    }
+    let url;
+    try {
+      url = new URL(String(value).trim());
+    } catch (e) {
+      return { valid: false, warning: null, error: "\u4E0D\u662F\u6709\u6548 URL" };
+    }
+    if (url.protocol !== "http:" && url.protocol !== "https:") {
+      return { valid: false, warning: null, error: "\u4EC5\u652F\u6301 HTTP(S) \u534F\u8BAE" };
+    }
+    if (!url.hostname) {
+      return { valid: false, warning: null, error: "URL \u7F3A\u5C11\u4E3B\u673A\u540D" };
+    }
+    if (url.username || url.password) {
+      return { valid: false, warning: null, error: "URL \u4E0D\u5F97\u5305\u542B\u7528\u6237\u540D\u6216\u5BC6\u7801\u51ED\u636E" };
+    }
+    if (url.protocol === "http:" && !isLoopbackHostname(url.hostname)) {
+      return {
+        valid: true,
+        warning: "\u975E\u672C\u673A HTTP endpoint \u672A\u52A0\u5BC6\uFF0CAPI Key \u53EF\u80FD\u4EE5\u660E\u6587\u4F20\u8F93",
+        error: null
+      };
+    }
+    return { valid: true, warning: null, error: null };
+  }
+  function isLoopbackHostname(hostname) {
+    const host = String(hostname || "").toLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, "");
+    if (host === "localhost" || host.endsWith(".localhost")) return true;
+    if (host === "::1" || host === "0:0:0:0:0:0:0:1") return true;
+    return /^127(?:\.\d{1,3}){0,3}$/.test(host);
   }
   function pickProviderFields(obj) {
     const name = firstString(obj, ["name", "title", "label", "provider", "providerName", "_type", "type"]);
@@ -1561,8 +1831,10 @@ ${appended.join("\n")}`;
     const w = [];
     if (fields.endpoint && !fields.apiKey) w.push("\u672A\u8BC6\u522B\u5230 API Key\uFF0C\u4ECD\u53EF\u5C1D\u8BD5\u5BFC\u5165");
     if (!fields.endpoint && fields.apiKey) w.push("\u672A\u8BC6\u522B\u5230 endpoint/base URL\uFF0C\u4ECD\u53EF\u5C1D\u8BD5\u5BFC\u5165");
-    if (fields.endpoint && !/^https?:\/\//i.test(fields.endpoint)) {
-      w.push("endpoint \u4E0D\u662F http(s) URL");
+    if (fields.endpoint) {
+      const endpointPolicy = inspectEndpoint(fields.endpoint);
+      if (!endpointPolicy.valid) w.push(`endpoint \u5DF2\u963B\u6B62\uFF1A${endpointPolicy.error}`);
+      else if (endpointPolicy.warning) w.push(endpointPolicy.warning);
     }
     if (fields.apiKey) {
       const k = String(fields.apiKey);
@@ -1626,7 +1898,7 @@ ${appended.join("\n")}`;
     /claude-3\.5-haiku(?:-\d{8})?/gi,
     /claude-3-haiku(?:-\d{8})?/gi,
     /claude-3-opus(?:-\d{8})?/gi,
-    /claude-(?:haiku|sonnet|opus)-\d+(?:\.\d+)?(?:-(?:\d{8}|\d{1,2}))?(?![a-z0-9.])/gi,
+    /claude-(?:haiku|sonnet|opus|fable|mythos)-\d+(?:(?:[.-]\d{1,2})(?:-\d{8})?|-\d{8})?(?![a-z0-9.-])/gi,
     /\bclaude-sonnet\b/gi,
     /\bclaude-haiku\b/gi,
     /\bclaude-opus\b/gi,
@@ -1714,9 +1986,22 @@ ${appended.join("\n")}`;
     const prefer = app === "claude" ? (m) => /claude/i.test(m) : app === "codex" ? (m) => /gpt|o1|o3|codex/i.test(m) : () => false;
     return models.slice().sort((a, b) => Number(prefer(b)) - Number(prefer(a)));
   }
+  function chooseModelForApp(models, app, manualSelection, detectedDefault) {
+    const available = Array.isArray(models) ? models : [];
+    if (manualSelection && available.includes(manualSelection)) return manualSelection;
+    if (!available.length) return null;
+    const ordered = filterModelsForApp(available, app);
+    if (app === "claude") {
+      return ordered.find((model) => /claude.*sonnet|sonnet.*claude/i.test(model)) || ordered.find((model) => /claude/i.test(model)) || (detectedDefault && ordered.includes(detectedDefault) ? detectedDefault : null) || ordered[0];
+    }
+    if (app === "codex") {
+      return ordered.find((model) => /gpt|(?:^|[-_])o[13](?:$|[-_])|codex/i.test(model)) || (detectedDefault && ordered.includes(detectedDefault) ? detectedDefault : null) || ordered[0];
+    }
+    return detectedDefault && ordered.includes(detectedDefault) ? detectedDefault : ordered[0];
+  }
 
   // userscript/ui-main.js
-  var SCRIPT_VERSION = "1.2.9";
+  var SCRIPT_VERSION = "1.2.10";
   var ROOT_ID = "ccs-ld-root";
   var Z = 2147483e3;
   var lastSelectionText = "";
@@ -1726,7 +2011,11 @@ ${appended.join("\n")}`;
   var currentModelInfo = null;
   var currentDeeplink = null;
   var selectedModel = null;
+  var manualModelSelection = false;
   var includeFullConfig = true;
+  var includeRiskyParams = false;
+  var deeplinkError = null;
+  var previouslyFocused = null;
   function ensureRoot() {
     let host = document.getElementById(ROOT_ID);
     if (host) return host.shadowRoot;
@@ -1868,10 +2157,10 @@ ${appended.join("\n")}`;
       overlay.id = "overlay";
       overlay.className = "ccs-overlay";
       overlay.innerHTML = `
-      <div class="ccs-card" role="dialog" aria-modal="true">
-        <h2>\u5BFC\u5165\u5230 CC Switch</h2>
+      <div class="ccs-card" role="dialog" aria-modal="true" aria-labelledby="dialog-title" aria-describedby="warn err" tabindex="-1">
+        <h2 id="dialog-title">\u5BFC\u5165\u5230 CC Switch</h2>
         <div class="ccs-meta" id="meta"></div>
-        <div class="ccs-err" id="err" style="display:none"></div>
+        <div class="ccs-err" id="err" role="alert" aria-live="assertive" style="display:none"></div>
         <div class="ccs-fields" id="fields"></div>
         <div class="ccs-cand" id="cand">
           <button type="button" id="cand-prev" aria-label="\u4E0A\u4E00\u7EC4\u5019\u9009">\u2039</button>
@@ -1889,7 +2178,14 @@ ${appended.join("\n")}`;
             <div class="ccs-config-meta" id="config-meta"></div>
           </span>
         </label>
-        <div class="ccs-warn" id="warn"></div>
+        <label class="ccs-config-opt" id="provider-opt">
+          <input type="checkbox" id="include-provider-params" />
+          <span>
+            <span>\u643A\u5E26\u98CE\u9669/\u672A\u77E5\u9644\u52A0\u53C2\u6570</span>
+            <div class="ccs-config-meta" id="provider-meta"></div>
+          </span>
+        </label>
+        <div class="ccs-warn" id="warn" role="status" aria-live="polite"></div>
         <div class="ccs-apps">
           <button type="button" data-app="claude" id="app-claude">Claude Code</button>
           <button type="button" data-app="codex" id="app-codex">Codex</button>
@@ -1908,6 +2204,8 @@ ${appended.join("\n")}`;
       toast = document.createElement("div");
       toast.id = "toast";
       toast.className = "ccs-toast";
+      toast.setAttribute("role", "status");
+      toast.setAttribute("aria-live", "polite");
       shadow.appendChild(toast);
       shadow.getElementById("cancel").addEventListener("click", closeCard);
       shadow.getElementById("copy").addEventListener("click", () => copyDeeplink(true));
@@ -1918,6 +2216,7 @@ ${appended.join("\n")}`;
       shadow.getElementById("cand-next").addEventListener("click", () => shiftCandidate(1));
       shadow.getElementById("model-select").addEventListener("change", onModelSelect);
       shadow.getElementById("include-config").addEventListener("change", onIncludeConfigChange);
+      shadow.getElementById("include-provider-params").addEventListener("change", onIncludeProviderParamsChange);
     }
     return { shadow, btn, overlay, toast };
   }
@@ -2033,48 +2332,44 @@ ${appended.join("\n")}`;
   function onImportClick(e) {
     e.preventDefault();
     e.stopPropagation();
+    previouslyFocused = e.currentTarget;
     const text = lastSelectionText || getSelectionText();
     const { btn } = getUi();
     btn.classList.remove("show");
     const result = parseShareText(text);
     if (!result) {
-      openErrorCard("\u672A\u8BC6\u522B\u5230 API \u914D\u7F6E\u3002\u8BF7\u9009\u4E2D\u5305\u542B base URL / API Key / ccswitch \u6DF1\u94FE / Base64 \u914D\u7F6E \u7684\u6587\u672C\u3002");
+      openErrorCard(
+        text.length > MAX_SELECTION_LEN ? "\u9009\u533A\u8FC7\u5927\uFF0C\u914D\u7F6E\u53EF\u80FD\u4F4D\u4E8E\u672A\u89E3\u6790\u7684\u4E2D\u95F4\u90E8\u5206\u3002\u8BF7\u7F29\u5C0F\u9009\u533A\uFF0C\u53EA\u4FDD\u7559\u4E00\u4E2A\u5B8C\u6574\u914D\u7F6E\u5757\u540E\u91CD\u8BD5\u3002" : "\u672A\u8BC6\u522B\u5230 API \u914D\u7F6E\u3002\u8BF7\u9009\u4E2D\u5305\u542B base URL / API Key / ccswitch \u6DF1\u94FE / Base64 \u914D\u7F6E \u7684\u6587\u672C\u3002"
+      );
       return;
     }
     currentResult = result;
     selectedApp = result.app;
     selectedModel = null;
+    manualModelSelection = false;
     includeFullConfig = shouldIncludeFullConfigByDefault(result.config);
+    includeRiskyParams = false;
     refreshModelInfo(text);
     rebuildDeeplink();
-    if (includeFullConfig && currentDeeplink && currentDeeplink.length > MAX_DEEPLINK_LEN) {
-      includeFullConfig = false;
-      rebuildDeeplink();
-      result.warnings = [
-        ...result.warnings || [],
-        "\u5B8C\u6574\u914D\u7F6E\u751F\u6210\u7684\u6DF1\u94FE\u8FC7\u957F\uFF0C\u53EF\u80FD\u65E0\u6CD5\u5524\u8D77 CC Switch\u3002\u5DF2\u6539\u4E3A\u4EC5\u5BFC\u5165 endpoint/key\u3002"
-      ];
-    }
     renderCard(result);
   }
   function refreshModelInfo(sourceText) {
     const text = sourceText || lastSelectionText || "";
     let info = typeof extractModels === "function" ? extractModels(text) : { model: null, haikuModel: null, sonnetModel: null, opusModel: null, models: [] };
-    let models = info.models || [];
-    if (typeof filterModelsForApp === "function" && selectedApp) {
-      models = filterModelsForApp(models, selectedApp);
-    }
-    if (selectedModel && models.includes(selectedModel)) {
-      info = { ...info, models, model: selectedModel };
-    } else if (models.length === 1) {
-      selectedModel = models[0];
-      info = { ...info, models, model: models[0] };
-    } else if (models.length > 1) {
-      const preferred = info.model && models.includes(info.model) && info.model || models.find((m) => /sonnet/i.test(m)) || models[0];
+    const detectedModels = info.models || [];
+    if (detectedModels.length) {
+      const preferred = typeof chooseModelForApp === "function" ? chooseModelForApp(
+        detectedModels,
+        selectedApp,
+        manualModelSelection ? selectedModel : null,
+        info.model
+      ) : detectedModels[0];
+      const models2 = typeof filterModelsForApp === "function" && selectedApp ? filterModelsForApp(detectedModels, selectedApp) : detectedModels.slice();
       selectedModel = preferred;
-      info = { ...info, models, model: preferred };
+      info = { ...info, models: models2, model: preferred };
     } else {
       selectedModel = null;
+      manualModelSelection = false;
       info = {
         model: null,
         haikuModel: null,
@@ -2083,6 +2378,7 @@ ${appended.join("\n")}`;
         models: []
       };
     }
+    const models = info.models || [];
     if (selectedApp === "claude") {
       info.haikuModel = models.find((m) => /haiku/i.test(m)) || null;
       info.sonnetModel = models.find((m) => /sonnet/i.test(m)) || null;
@@ -2104,7 +2400,12 @@ ${appended.join("\n")}`;
     shadow.getElementById("config-opt").classList.remove("show");
     shadow.getElementById("include-config").checked = false;
     shadow.getElementById("config-meta").textContent = "";
+    shadow.getElementById("provider-opt").classList.remove("show");
+    shadow.getElementById("include-provider-params").checked = false;
+    shadow.getElementById("provider-meta").textContent = "";
     includeFullConfig = false;
+    includeRiskyParams = false;
+    deeplinkError = null;
     const err = shadow.getElementById("err");
     err.style.display = "block";
     err.textContent = msg;
@@ -2112,18 +2413,19 @@ ${appended.join("\n")}`;
     shadow.getElementById("app-codex").disabled = true;
     shadow.getElementById("open").disabled = true;
     shadow.getElementById("copy").disabled = true;
-    overlay.classList.add("show");
+    showDialog(overlay, shadow.getElementById("cancel"));
   }
   function renderCard(result) {
     var _a, _b;
     const { overlay, shadow } = getUi();
     const err = shadow.getElementById("err");
-    err.style.display = "none";
-    err.textContent = "";
+    const unsupportedMessage = result.unsupportedApp ? `\u6B64\u6DF1\u94FE\u76EE\u6807\u4E3A\u4E0D\u652F\u6301\u7684\u5E94\u7528\u300C${result.unsupportedApp}\u300D\uFF0C\u4E0D\u4F1A\u6539\u5199\u4E3A Claude Code \u6216 Codex\u3002` : "";
+    const blockingMessage = unsupportedMessage || deeplinkError && deeplinkError.message || "";
+    err.style.display = blockingMessage ? "block" : "none";
+    err.textContent = blockingMessage;
     shadow.getElementById("fields").style.display = "block";
-    shadow.getElementById("app-claude").disabled = false;
-    shadow.getElementById("app-codex").disabled = false;
-    shadow.getElementById("copy").disabled = false;
+    shadow.getElementById("app-claude").disabled = Boolean(result.unsupportedApp);
+    shadow.getElementById("app-codex").disabled = Boolean(result.unsupportedApp);
     const conf = Math.round((result.confidence || 0) * 100);
     const modelCount = ((_a = currentModelInfo == null ? void 0 : currentModelInfo.models) == null ? void 0 : _a.length) || 0;
     const candCount = ((_b = result.candidates) == null ? void 0 : _b.length) || result.candidateCount || 1;
@@ -2132,6 +2434,7 @@ ${appended.join("\n")}`;
     shadow.getElementById("meta").textContent = `\u8BC6\u522B\uFF1A${result.source} \xB7 \u7F6E\u4FE1\u5EA6 ${conf}%` + (candCount > 1 ? ` \xB7 \u5019\u9009 ${candIdx}/${candCount}` : "") + (modelCount ? ` \xB7 \u6A21\u578B\xD7${modelCount}` : "") + ` \xB7 v${ver}`;
     const modelLine = (currentModelInfo == null ? void 0 : currentModelInfo.model) ? escapeHtml(currentModelInfo.model) + (modelCount > 1 ? ` <span style="opacity:.65">(+${modelCount - 1})</span>` : "") : modelCount ? escapeHtml(currentModelInfo.models.slice(0, 3).join(", ")) + (modelCount > 3 ? "\u2026" : "") : "\u2014";
     const configInfo = result.config && typeof describeConfigPayload === "function" ? describeConfigPayload(result.config) : result.config ? { fields: [], sizeBytes: String(result.config).length } : null;
+    const providerInfo = result.providerParams && typeof describeProviderParams === "function" ? describeProviderParams(result.providerParams) : null;
     const fields = shadow.getElementById("fields");
     fields.innerHTML = `
     <div><span class="k">name</span>${escapeHtml(result.name || "")}</div>
@@ -2139,6 +2442,9 @@ ${appended.join("\n")}`;
     <div><span class="k">apiKey</span>${escapeHtml(maskKey(result.apiKey || "") || "\u2014")}</div>
     <div><span class="k">model</span>${modelLine}</div>
     <div><span class="k">app</span>${escapeHtml(selectedApp || "\u672A\u9009\u62E9")}</div>
+    ${providerInfo ? `<div><span class="k">\u9644\u52A0\u53C2\u6570</span>${escapeHtml(
+      providerInfo.fields.slice(0, 12).join("\u3001")
+    )}${providerInfo.fields.length > 12 ? "\u2026" : ""}</div>` : ""}
     ${configInfo ? `<div><span class="k">\u5B8C\u6574\u914D\u7F6E</span>${includeFullConfig ? "\u662F\uFF08\u5C06\u5199\u5165\u6DF1\u94FE\uFF09" : "\u5426\uFF08\u4EC5 endpoint/key\uFF09"}</div>
     <div><span class="k">\u9876\u5C42\u5B57\u6BB5</span>${escapeHtml(
       (configInfo.fields || []).slice(0, 12).join("\u3001") || "\uFF08\u975E JSON / \u65E0\u5B57\u6BB5\u540D\uFF09"
@@ -2160,6 +2466,21 @@ ${appended.join("\n")}`;
     } else {
       configOpt.classList.remove("show");
       configMeta.textContent = "";
+    }
+    const providerOpt = shadow.getElementById("provider-opt");
+    const includeProviderCb = shadow.getElementById("include-provider-params");
+    const providerMeta = shadow.getElementById("provider-meta");
+    if (providerInfo == null ? void 0 : providerInfo.risky) {
+      providerOpt.classList.add("show");
+      includeProviderCb.checked = includeRiskyParams;
+      providerMeta.textContent = [
+        providerInfo.riskyFields.length ? `\u9AD8\u98CE\u9669\uFF1A${providerInfo.riskyFields.slice(0, 6).join("\u3001")}` : "",
+        providerInfo.unknownFields.length ? `\u672A\u77E5\uFF1A${providerInfo.unknownFields.slice(0, 6).join("\u3001")}` : ""
+      ].filter(Boolean).join(" \xB7 ");
+    } else {
+      providerOpt.classList.remove("show");
+      includeProviderCb.checked = false;
+      providerMeta.textContent = "";
     }
     const candEl = shadow.getElementById("cand");
     if (candCount > 1 && result.candidates && result.candidates.length > 1) {
@@ -2191,6 +2512,11 @@ ${appended.join("\n")}`;
         "\u914D\u7F6E\u5305\u542B\u9AD8\u98CE\u9669\u9644\u52A0\u5B57\u6BB5\uFF0C\u8BF7\u786E\u8BA4\u6765\u6E90\u53EF\u4FE1" + (configInfo.riskReasons && configInfo.riskReasons.length ? `\uFF08${configInfo.riskReasons.join("\uFF1B")}\uFF09` : "")
       );
     }
+    if (providerInfo == null ? void 0 : providerInfo.risky) {
+      warnings.push(
+        `\u98CE\u9669/\u672A\u77E5\u9644\u52A0\u53C2\u6570\u9ED8\u8BA4\u4E0D\u643A\u5E26\uFF08${providerInfo.riskReasons.join("\uFF1B")}\uFF09`
+      );
+    }
     if (includeFullConfig && currentDeeplink && currentDeeplink.length > MAX_DEEPLINK_LEN * 0.85) {
       warnings.push(
         `\u6DF1\u94FE\u8F83\u957F\uFF08${currentDeeplink.length} \u5B57\u7B26\uFF09\uFF0C\u82E5\u65E0\u6CD5\u5524\u8D77\u8BF7\u53D6\u6D88\u300C\u643A\u5E26\u5B8C\u6574\u914D\u7F6E\u300D`
@@ -2198,8 +2524,13 @@ ${appended.join("\n")}`;
     }
     warn.textContent = warnings.join("\uFF1B");
     syncAppButtons();
-    shadow.getElementById("open").disabled = !selectedApp;
-    overlay.classList.add("show");
+    const blocked = !selectedApp || Boolean(result.unsupportedApp) || !currentDeeplink;
+    shadow.getElementById("open").disabled = blocked;
+    shadow.getElementById("copy").disabled = blocked;
+    showDialog(
+      overlay,
+      selectedApp ? shadow.getElementById("open") : result.unsupportedApp ? shadow.getElementById("cancel") : shadow.getElementById("app-claude")
+    );
   }
   function shiftCandidate(delta) {
     if (!currentResult || typeof selectCandidate !== "function") return;
@@ -2213,6 +2544,7 @@ ${appended.join("\n")}`;
   function onModelSelect(e) {
     const v = e.target && e.target.value;
     selectedModel = v || null;
+    manualModelSelection = Boolean(selectedModel);
     if (currentModelInfo) {
       currentModelInfo = { ...currentModelInfo, model: selectedModel };
     }
@@ -2222,13 +2554,11 @@ ${appended.join("\n")}`;
   function onIncludeConfigChange(e) {
     includeFullConfig = !!(e.target && e.target.checked);
     rebuildDeeplink();
-    if (includeFullConfig && currentDeeplink && currentDeeplink.length > MAX_DEEPLINK_LEN) {
-      includeFullConfig = false;
-      rebuildDeeplink();
-      const { shadow } = getUi();
-      shadow.getElementById("include-config").checked = false;
-      showToast("\u5B8C\u6574\u914D\u7F6E\u751F\u6210\u7684\u6DF1\u94FE\u8FC7\u957F\uFF0C\u53EF\u80FD\u65E0\u6CD5\u5524\u8D77 CC Switch\u3002\u5EFA\u8BAE\u4EC5\u5BFC\u5165 endpoint/key\u3002", 4200);
-    }
+    if (currentResult) renderCard(currentResult);
+  }
+  function onIncludeProviderParamsChange(e) {
+    includeRiskyParams = !!(e.target && e.target.checked);
+    rebuildDeeplink();
     if (currentResult) renderCard(currentResult);
   }
   function formatBytes(n) {
@@ -2238,6 +2568,7 @@ ${appended.join("\n")}`;
     return `${(b / (1024 * 1024)).toFixed(1)} MB`;
   }
   function setApp(app) {
+    if (currentResult == null ? void 0 : currentResult.unsupportedApp) return;
     selectedApp = app;
     refreshModelInfo();
     rebuildDeeplink();
@@ -2250,19 +2581,44 @@ ${appended.join("\n")}`;
   }
   function rebuildDeeplink() {
     currentDeeplink = null;
+    deeplinkError = null;
     if (!currentResult || !selectedApp) return;
     try {
       const modelInfo = currentModelInfo ? { ...currentModelInfo, model: selectedModel || currentModelInfo.model } : null;
       currentDeeplink = buildDeeplink(currentResult, selectedApp, modelInfo, {
-        includeConfig: includeFullConfig
+        includeConfig: includeFullConfig,
+        includeRiskyParams
       });
     } catch (e) {
       currentDeeplink = null;
+      deeplinkError = e instanceof Error ? e : new Error(String(e || "\u65E0\u6CD5\u751F\u6210\u6DF1\u94FE"));
+    }
+  }
+  function showDialog(overlay, preferredFocus) {
+    const wasOpen = overlay.classList.contains("show");
+    if (!wasOpen && !previouslyFocused) {
+      const { shadow } = getUi();
+      previouslyFocused = shadow.activeElement || document.activeElement;
+    }
+    overlay.classList.add("show");
+    if (!wasOpen) {
+      requestAnimationFrame(() => {
+        const card = overlay.querySelector(".ccs-card");
+        const target = preferredFocus && !preferredFocus.disabled ? preferredFocus : card;
+        if (target && typeof target.focus === "function") target.focus();
+      });
     }
   }
   function closeCard() {
     const { overlay } = getUi();
+    if (!overlay.classList.contains("show")) return;
     overlay.classList.remove("show");
+    const restore = previouslyFocused;
+    previouslyFocused = null;
+    if ((restore == null ? void 0 : restore.id) === "btn") updateSelectionUi();
+    if (restore && restore.isConnected && typeof restore.focus === "function") {
+      requestAnimationFrame(() => restore.focus());
+    }
   }
   function copyText(text) {
     if (typeof GM_setClipboard === "function") {
@@ -2288,7 +2644,7 @@ ${appended.join("\n")}`;
   }
   function copyDeeplink(fromBtn) {
     if (!currentDeeplink) {
-      showToast("\u8BF7\u5148\u9009\u62E9 Claude Code \u6216 Codex");
+      showToast((deeplinkError == null ? void 0 : deeplinkError.message) || "\u8BF7\u5148\u9009\u62E9 Claude Code \u6216 Codex");
       return;
     }
     copyText(currentDeeplink).then((ok) => {
@@ -2308,7 +2664,7 @@ ${appended.join("\n")}`;
     }
     rebuildDeeplink();
     if (!currentDeeplink) {
-      showToast("\u65E0\u6CD5\u751F\u6210\u6DF1\u94FE");
+      showToast((deeplinkError == null ? void 0 : deeplinkError.message) || "\u65E0\u6CD5\u751F\u6210\u6DF1\u94FE");
       return;
     }
     const link = currentDeeplink;
@@ -2331,7 +2687,34 @@ ${appended.join("\n")}`;
     return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
   }
   function onKeydown(e) {
-    if (e.key === "Escape") closeCard();
+    var _a;
+    const { overlay, shadow } = getUi();
+    if (!overlay.classList.contains("show")) return;
+    if (e.key === "Escape") {
+      e.preventDefault();
+      closeCard();
+      return;
+    }
+    if (e.key !== "Tab") return;
+    const focusable = Array.from(
+      overlay.querySelectorAll(
+        'button:not([disabled]), select:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])'
+      )
+    ).filter((element) => element.getClientRects().length > 0);
+    if (!focusable.length) {
+      e.preventDefault();
+      (_a = overlay.querySelector(".ccs-card")) == null ? void 0 : _a.focus();
+      return;
+    }
+    const active = shadow.activeElement;
+    const index = focusable.indexOf(active);
+    if (e.shiftKey && index <= 0) {
+      e.preventDefault();
+      focusable[focusable.length - 1].focus();
+    } else if (!e.shiftKey && (index < 0 || index === focusable.length - 1)) {
+      e.preventDefault();
+      focusable[0].focus();
+    }
   }
   function init() {
     document.addEventListener("selectionchange", scheduleUpdate);
