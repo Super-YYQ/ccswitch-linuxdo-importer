@@ -10,6 +10,7 @@ import {
   enrichTextWithAnchorHrefs,
   selectCandidate,
   describeConfigPayload,
+  describeProviderParams,
   shouldIncludeFullConfigByDefault,
   MAX_DEEPLINK_LEN,
 } from '../userscript/lib/core.mjs'
@@ -335,6 +336,24 @@ describe('parseShareText · json', () => {
     assert.ok(r.config, 'full env config should attach config payload')
     assert.equal(r.configFormat, 'json')
   })
+
+  it('handles nested/quoted braces, many objects, and an earlier unclosed string', () => {
+    const provider = JSON.stringify({
+      name: 'Scanner fixture',
+      env: {
+        ANTHROPIC_BASE_URL: SYNTH.endpoint,
+        ANTHROPIC_AUTH_TOKEN: SYNTH.skAnt,
+      },
+      notes: 'literal { brace } and an escaped "quote"',
+    })
+    const text = `{"broken":"unterminated\n${'{}\n'.repeat(15)}${provider}`
+    const r = parseShareText(text)
+
+    assert.ok(r)
+    assert.equal(r.endpoint, SYNTH.endpoint)
+    assert.equal(r.apiKey, SYNTH.skAnt)
+    assert.equal(r.name, 'Scanner fixture')
+  })
 })
 
 describe('parseShareText · base64', () => {
@@ -411,6 +430,98 @@ key：${SYNTH.skAntMixed}`
     assert.equal(r.endpoint, SYNTH.endpoint)
     assert.equal(r.apiKey, SYNTH.skAntDeeplink)
     assert.equal(r.name, 'NoSlash')
+  })
+
+  it('round-trips recognized safe provider parameters', () => {
+    const params = new URLSearchParams({
+      resource: 'provider',
+      app: 'claude',
+      name: 'Safe metadata',
+      endpoint: SYNTH.endpoint,
+      apiKey: SYNTH.skAntDeeplink,
+      homepage: 'https://provider.example.invalid',
+      notes: 'synthetic relay',
+      icon: 'https://provider.example.invalid/icon.png',
+      enabled: 'false',
+      model: 'claude-sonnet-4-5-20250929',
+      haikuModel: 'claude-haiku-4-5-20251001',
+      sonnetModel: 'claude-sonnet-4-5-20250929',
+      opusModel: 'claude-opus-4-1-20250805',
+    })
+    const r = parseShareText(`ccswitch://v1/import?${params}`)
+    assert.ok(r)
+    const rebuilt = new URL(buildDeeplink(r))
+
+    for (const name of [
+      'homepage',
+      'notes',
+      'icon',
+      'enabled',
+      'model',
+      'haikuModel',
+      'sonnetModel',
+      'opusModel',
+    ]) {
+      assert.equal(rebuilt.searchParams.get(name), params.get(name), name)
+    }
+  })
+
+  it('discloses risky and unknown provider parameters and requires opt-in', () => {
+    const params = new URLSearchParams({
+      resource: 'provider',
+      app: 'codex',
+      name: 'Risky metadata',
+      endpoint: SYNTH.endpoint,
+      apiKey: SYNTH.skPlain,
+      notes: 'safe note',
+      configUrl: 'https://remote.example.invalid/provider.json',
+      usageScript: 'node usage.js',
+      futureToggle: 'on',
+    })
+    const r = parseShareText(`ccswitch://v1/import?${params}`)
+    assert.ok(r)
+    const info = describeProviderParams(r.providerParams)
+    assert.equal(info.risky, true)
+    assert.deepEqual(info.riskyFields.sort(), ['configUrl', 'usageScript'])
+    assert.deepEqual(info.unknownFields, ['futureToggle'])
+
+    const safeOnly = new URL(buildDeeplink(r))
+    assert.equal(safeOnly.searchParams.get('notes'), 'safe note')
+    assert.equal(safeOnly.searchParams.has('configUrl'), false)
+    assert.equal(safeOnly.searchParams.has('usageScript'), false)
+    assert.equal(safeOnly.searchParams.has('futureToggle'), false)
+
+    const optedIn = new URL(
+      buildDeeplink(r, undefined, undefined, { includeRiskyParams: true }),
+    )
+    assert.equal(optedIn.searchParams.get('configUrl'), params.get('configUrl'))
+    assert.equal(optedIn.searchParams.get('usageScript'), params.get('usageScript'))
+    assert.equal(optedIn.searchParams.get('futureToggle'), params.get('futureToggle'))
+  })
+
+  it('distinguishes unsupported provider apps and prevents cross-app rewrites', () => {
+    for (const app of ['gemini', 'opencode', 'openclaw']) {
+      const params = new URLSearchParams({
+        resource: 'provider',
+        app,
+        name: `Unsupported ${app}`,
+        endpoint: SYNTH.endpoint,
+        apiKey: SYNTH.skPlain,
+      })
+      const r = parseShareText(`ccswitch://v1/import?${params}`)
+      assert.ok(r)
+      assert.equal(r.app, null)
+      assert.equal(r.unsupportedApp, app)
+      assert.throws(() => buildDeeplink(r, 'claude'), /不支持|unsupported/i)
+      assert.throws(() => buildDeeplink(r, 'codex'), /不支持|unsupported/i)
+    }
+
+    const missingApp = parseShareText(
+      `ccswitch://v1/import?resource=provider&name=Ambiguous&endpoint=${encodeURIComponent(SYNTH.endpoint)}&apiKey=${SYNTH.skPlain}`,
+    )
+    assert.ok(missingApp)
+    assert.equal(missingApp.app, null)
+    assert.equal(missingApp.unsupportedApp, null)
   })
 })
 
@@ -637,6 +748,40 @@ ${SYNTH.endpointAnthropic}`
     assert.ok(r.warnings.some((w) => /选区过大|截断/.test(w)))
   })
 
+  it('samples both ends of oversized selections and reports the omitted middle', () => {
+    const text =
+      '无关讨论内容'.repeat(20_000) + `\nurl：${SYNTH.endpoint}\nkey：${SYNTH.skAnt}\n`
+
+    assert.ok(text.length > 64 * 1024)
+    assert.equal(looksLikeConfig(text), true)
+    const r = parseShareText(text)
+
+    assert.ok(r)
+    assert.equal(r.endpoint, SYNTH.endpoint)
+    assert.equal(r.apiKey, SYNTH.skAnt)
+    assert.ok(r.warnings.some((w) => /开头和结尾|中间内容已省略/.test(w)))
+  })
+
+  it('keeps an oversized omitted-middle selection actionable', () => {
+    const padding = '普通讨论内容'.repeat(7_000)
+    const text =
+      padding + `\nurl：${SYNTH.endpoint}\nkey：${SYNTH.skAnt}\n` + padding
+
+    assert.ok(text.length > 64 * 1024)
+    assert.equal(looksLikeConfig(text), true)
+    assert.equal(parseShareText(text), null)
+  })
+
+  it('bounds malformed JSON scanning at the maximum selection size', () => {
+    const text = '{'.repeat(64 * 1024)
+    const started = Date.now()
+    const r = parseShareText(text)
+    const elapsed = Date.now() - started
+
+    assert.equal(r, null)
+    assert.ok(elapsed < 1000, `malformed parse exceeded the 1s budget: ${elapsed}ms`)
+  })
+
   it('parses Discourse onebox bare host + g2a_ key (no https scheme in selection)', () => {
     // linux.do onebox shows host text without scheme; key sits under 总结
     const text = `c
@@ -736,6 +881,19 @@ API Key     ${SYNTH.skPlain}`
       }),
       null,
     )
+  })
+  it('uses structured CLAUDE env signals before removing model-like text', () => {
+    const r = parseShareText(
+      `CLAUDE_BASE_URL=${SYNTH.endpoint}\nCLAUDE_API_KEY=${SYNTH.skPlain}`,
+    )
+    assert.ok(r)
+    assert.equal(r.app, 'claude')
+
+    const mixed = classifyApp(
+      `CLAUDE_BASE_URL=${SYNTH.endpoint}\nOPENAI_BASE_URL=${SYNTH.endpoint}`,
+      {},
+    )
+    assert.equal(mixed, null)
   })
 })
 
@@ -965,6 +1123,121 @@ describe('buildDeeplink', () => {
     const cjk = JSON.stringify({ env: { NOTE: '中文配置说明一二三四' } })
     const cjkInfo = describeConfigPayload(cjk)
     assert.ok(cjkInfo.sizeBytes > cjk.length)
+  })
+
+  it('defaults process-affecting and unknown environment variables to excluded', () => {
+    const cfg = JSON.stringify({
+      env: {
+        ANTHROPIC_BASE_URL: SYNTH.endpoint,
+        ANTHROPIC_AUTH_TOKEN: SYNTH.skAnt,
+        NODE_OPTIONS: '--require ./bootstrap.js',
+        BASH_ENV: '/tmp/profile',
+        RELAY_EXPERIMENT: 'enabled',
+      },
+    })
+
+    const info = describeConfigPayload(cfg)
+    assert.ok(info)
+    assert.equal(info.risky, true)
+    assert.ok(info.riskReasons.some((reason) => /NODE_OPTIONS|BASH_ENV/.test(reason)))
+    assert.ok(info.riskReasons.some((reason) => /RELAY_EXPERIMENT|未知环境变量/.test(reason)))
+    assert.equal(shouldIncludeFullConfigByDefault(cfg), false)
+    const defaultLink = new URL(
+      buildDeeplink({
+        name: 'Risky default',
+        app: 'claude',
+        endpoint: SYNTH.endpoint,
+        apiKey: SYNTH.skAnt,
+        config: cfg,
+        configFormat: 'json',
+      }),
+    )
+    assert.equal(defaultLink.searchParams.has('config'), false)
+  })
+
+  it('recursively detects risky fields and enforces inspection budgets', () => {
+    const nestedRisk = JSON.stringify({
+      env: {
+        ANTHROPIC_BASE_URL: SYNTH.endpoint,
+        ANTHROPIC_AUTH_TOKEN: SYNTH.skAnt,
+      },
+      settings: { models: [{ command: 'launch-helper' }] },
+    })
+    const nestedInfo = describeConfigPayload(nestedRisk)
+    assert.ok(nestedInfo.riskReasons.some((reason) => /command/.test(reason)))
+
+    let deep = { model: 'claude-sonnet-4' }
+    for (let i = 0; i < 16; i++) deep = { settings: deep }
+    const deepInfo = describeConfigPayload(JSON.stringify(deep))
+    assert.ok(deepInfo.riskReasons.some((reason) => /安全深度/.test(reason)))
+
+    const wide = { env: { ANTHROPIC_BASE_URL: SYNTH.endpoint } }
+    for (let i = 0; i < 300; i++) wide.env[`EXTRA_${i}`] = String(i)
+    const wideInfo = describeConfigPayload(JSON.stringify(wide))
+    assert.ok(wideInfo.riskReasons.some((reason) => /安全上限/.test(reason)))
+  })
+
+  it('validates endpoint URLs and warns for non-loopback HTTP', () => {
+    const makeResult = (endpoint) => ({
+      name: 'Endpoint policy',
+      app: 'claude',
+      endpoint,
+      apiKey: SYNTH.skAnt,
+    })
+
+    assert.doesNotThrow(() => buildDeeplink(makeResult('https://relay.example.invalid/v1')))
+    assert.doesNotThrow(() => buildDeeplink(makeResult('http://127.0.0.1:8080/v1')))
+
+    const insecure = parseShareText(
+      `ccswitch://v1/import?resource=provider&app=claude&name=HTTP&endpoint=${encodeURIComponent('http://relay.example.invalid/v1')}&apiKey=${SYNTH.skAnt}`,
+    )
+    assert.ok(insecure)
+    assert.ok(insecure.warnings.some((warning) => /未加密|非本机.*HTTP/.test(warning)))
+
+    for (const endpoint of [
+      'https://user:pass@relay.example.invalid/v1',
+      'ftp://relay.example.invalid/v1',
+      'not a url',
+    ]) {
+      assert.throws(() => buildDeeplink(makeResult(endpoint)), /endpoint|URL|凭据|协议/i)
+    }
+  })
+
+  it('enforces the final deep-link limit for every parameter source', () => {
+    const base = {
+      name: 'Length policy',
+      app: 'claude',
+      endpoint: SYNTH.endpoint,
+      apiKey: SYNTH.skAnt,
+    }
+    const cases = [
+      { ...base, name: 'N'.repeat(MAX_DEEPLINK_LEN) },
+      {
+        ...base,
+        endpoint: `https://relay.example.invalid/${'e'.repeat(MAX_DEEPLINK_LEN)}`,
+      },
+      { ...base, apiKey: `sk-${'k'.repeat(MAX_DEEPLINK_LEN)}` },
+      {
+        ...base,
+        providerParams: { notes: 'm'.repeat(MAX_DEEPLINK_LEN) },
+      },
+      {
+        ...base,
+        config: JSON.stringify({ env: { ANTHROPIC_MODEL: 'c'.repeat(MAX_DEEPLINK_LEN) } }),
+        configFormat: 'json',
+      },
+      {
+        ...base,
+        name: 'n'.repeat(2700),
+        apiKey: `sk-${'k'.repeat(2700)}`,
+        providerParams: { notes: 'm'.repeat(2700) },
+      },
+    ]
+
+    for (const input of cases) {
+      assert.throws(() => buildDeeplink(input), /8.?000|过长|长度/)
+    }
+    assert.ok(buildDeeplink(base).length < MAX_DEEPLINK_LEN)
   })
 
   it('MAX_DEEPLINK_LEN is a finite conservative cap', () => {

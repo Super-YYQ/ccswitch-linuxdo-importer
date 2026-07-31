@@ -1,6 +1,10 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { extractModels, filterModelsForApp } from '../userscript/lib/model-extractor.mjs'
+import {
+  chooseModelForApp,
+  extractModels,
+  filterModelsForApp,
+} from '../userscript/lib/model-extractor.mjs'
 import { base64Encode } from '../userscript/lib/core.mjs'
 
 describe('extractModels', () => {
@@ -122,6 +126,23 @@ describe('extractModels', () => {
     assert.equal(r.sonnetModel, 'claude-sonnet-4-20250514')
     assert.equal(r.opusModel, 'claude-opus-4-1')
   })
+
+  it('preserves dated minor snapshots and recognizes current Claude families', () => {
+    const ids = [
+      'claude-sonnet-4-5-20250929',
+      'claude-haiku-4-5-20251001',
+      'claude-opus-4-1-20250805',
+      'claude-sonnet-4-6',
+      'claude-fable-5',
+      'claude-mythos-5-0',
+    ]
+    const r = extractModels(ids.join(' '))
+
+    for (const id of ids) assert.ok(r.models.includes(id), `missing ${id}: ${r.models}`)
+    assert.ok(!r.models.includes('claude-sonnet-4-5'))
+    assert.ok(!r.models.includes('claude-haiku-4-5'))
+    assert.ok(!r.models.includes('claude-opus-4-1'))
+  })
 })
 
 describe('filterModelsForApp', () => {
@@ -148,5 +169,17 @@ describe('filterModelsForApp', () => {
     const models = ['claude-3.5-sonnet', 'gpt-4o']
     const filtered = filterModelsForApp(models, null)
     assert.equal(filtered.length, models.length)
+  })
+
+  it('chooses an app-aware default while retaining a valid manual selection', () => {
+    const models = ['claude-sonnet-4-6', 'gpt-5.5', 'grok-4.5']
+    assert.equal(chooseModelForApp(models, 'claude'), 'claude-sonnet-4-6')
+    assert.equal(chooseModelForApp(models, 'codex'), 'gpt-5.5')
+    assert.equal(
+      chooseModelForApp(models, 'codex', 'grok-4.5'),
+      'grok-4.5',
+      'valid manual relay selection must win',
+    )
+    assert.equal(chooseModelForApp(models, 'codex', 'removed-model'), 'gpt-5.5')
   })
 })

@@ -26,7 +26,7 @@ const MODEL_RES = [
   /claude-3\.5-haiku(?:-\d{8})?/gi,
   /claude-3-haiku(?:-\d{8})?/gi,
   /claude-3-opus(?:-\d{8})?/gi,
-  /claude-(?:haiku|sonnet|opus)-\d+(?:\.\d+)?(?:-(?:\d{8}|\d{1,2}))?(?![a-z0-9.])/gi,
+  /claude-(?:haiku|sonnet|opus|fable|mythos)-\d+(?:(?:[.-]\d{1,2})(?:-\d{8})?|-\d{8})?(?![a-z0-9.-])/gi,
   /\bclaude-sonnet\b/gi,
   /\bclaude-haiku\b/gi,
   /\bclaude-opus\b/gi,
@@ -162,4 +162,38 @@ export function filterModelsForApp(models, app) {
         : () => false
 
   return models.slice().sort((a, b) => Number(prefer(b)) - Number(prefer(a)))
+}
+
+/**
+ * Choose the model shown as the default without removing relay alternatives.
+ * A valid manual selection always wins. Otherwise the target application
+ * controls the preferred family, with Sonnet retaining the Claude default.
+ * @param {string[]} models
+ * @param {'claude'|'codex'|null} app
+ * @param {string|null} [manualSelection]
+ * @param {string|null} [detectedDefault]
+ * @returns {string|null}
+ */
+export function chooseModelForApp(models, app, manualSelection, detectedDefault) {
+  const available = Array.isArray(models) ? models : []
+  if (manualSelection && available.includes(manualSelection)) return manualSelection
+  if (!available.length) return null
+
+  const ordered = filterModelsForApp(available, app)
+  if (app === 'claude') {
+    return (
+      ordered.find((model) => /claude.*sonnet|sonnet.*claude/i.test(model)) ||
+      ordered.find((model) => /claude/i.test(model)) ||
+      (detectedDefault && ordered.includes(detectedDefault) ? detectedDefault : null) ||
+      ordered[0]
+    )
+  }
+  if (app === 'codex') {
+    return (
+      ordered.find((model) => /gpt|(?:^|[-_])o[13](?:$|[-_])|codex/i.test(model)) ||
+      (detectedDefault && ordered.includes(detectedDefault) ? detectedDefault : null) ||
+      ordered[0]
+    )
+  }
+  return detectedDefault && ordered.includes(detectedDefault) ? detectedDefault : ordered[0]
 }

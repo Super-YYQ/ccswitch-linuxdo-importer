@@ -11,6 +11,10 @@ const MAX_JSON_OBJECTS = 16
 const MAX_URLS = 8
 const MAX_KEYS = 8
 const MAX_CANDIDATES = 12
+const MAX_CONFIG_DEPTH = 12
+const MAX_CONFIG_FIELDS = 256
+const SELECTION_OMISSION_MARKER = '\n\n[选区中间内容已省略]\n\n'
+const OVERSIZED_SELECTION_WARNING = '选区过大，已取开头和结尾片段解析；中间内容已省略'
 
 const ENV_URL_KEYS = [
   'ANTHROPIC_BASE_URL',
@@ -36,6 +40,24 @@ const ENV_KEY_KEYS = [
   'AUTH_TOKEN',
   'TOKEN',
 ]
+const RISKY_ENV_NAMES = new Set([
+  'NODE_OPTIONS',
+  'BASH_ENV',
+  'ENV',
+  'LD_PRELOAD',
+  'LD_LIBRARY_PATH',
+  'DYLD_INSERT_LIBRARIES',
+  'DYLD_LIBRARY_PATH',
+  'PATH',
+  'PATHEXT',
+  'PYTHONPATH',
+  'NODE_PATH',
+  'CLASSPATH',
+  'SHELL',
+  'COMSPEC',
+  'PROMPT_COMMAND',
+  'GIT_SSH_COMMAND',
+])
 
 const URL_RE = /https?:\/\/[^\s"'`<>，。；、）)\]}]+/gi
 // Discourse onebox / paste often drops the scheme: grok2api-v2.onrender.com
@@ -58,6 +80,37 @@ const B64_BOUNDARY_R = '(?:$|[\\s"\'`，。；、！？]|(?=[一-鿿]))'
 const BASE64_RE = new RegExp(`${B64_BOUNDARY_L}([A-Za-z0-9+/]{40,}={0,2})${B64_BOUNDARY_R}`, 'g')
 // Accept both ccswitch://... and ccswitch:... (no authority slashes)
 const DEEPLINK_RE = /ccswitch:(?:\/\/)?[^\s"'`<>]+/gi
+const SAFE_PROVIDER_PARAM_NAMES = new Set([
+  'homepage',
+  'model',
+  'haikuModel',
+  'sonnetModel',
+  'opusModel',
+  'notes',
+  'icon',
+  'enabled',
+])
+const RISKY_PROVIDER_PARAM_NAMES = new Set([
+  'configUrl',
+  'usageScript',
+  'usageEnabled',
+  'usageApiKey',
+  'usageBaseUrl',
+  'usageAccessToken',
+  'usageUserId',
+  'usageAutoInterval',
+])
+const CONSUMED_PROVIDER_PARAM_NAMES = new Set([
+  'resource',
+  'app',
+  'name',
+  'endpoint',
+  'baseUrl',
+  'apiKey',
+  'api_key',
+  'config',
+  'configFormat',
+])
 // Known API key prefixes (sk-/g2a_/tp- token-plan, plus rare vendor tags).
 // ark- = Volcengine 方舟 (ark.cn-beijing.volces.com / api.volcengine.com):
 // base64-shared key decodes to `ark-<uuid>-<suffix>`. Listed here so decoded
@@ -87,7 +140,9 @@ const VENDOR_KEY_RE = /\b(?:g2a_|tp-|nk-|pk-|rk-|ark-|xai-|gsk_|pplx-|r8_|hf_|fw
  *   candidates: CandidatePair[],
  *   warnings: string[],
  *   deeplink?: string|null,
- *   models?: string[]
+ *   models?: string[],
+ *   providerParams?: Record<string, string>|null,
+ *   unsupportedApp?: string|null
  * }} ParseResult
  */
 
@@ -99,8 +154,9 @@ export function parseShareText(text) {
   if (text == null) return null
   let raw = normalizeShareText(text)
   if (raw.length < MIN_SELECTION_LEN) return null
-  const oversized = raw.length > MAX_SELECTION_LEN
-  if (oversized) raw = raw.slice(0, MAX_SELECTION_LEN)
+  const sampled = sampleSelection(raw)
+  raw = sampled.text
+  const oversized = sampled.oversized
 
   let cleaned = repairBrokenBase64(stripMarkdownFences(raw))
 
@@ -111,7 +167,7 @@ export function parseShareText(text) {
     if (fromLink) {
       fromLink.deeplink = deep
       if (oversized) {
-        fromLink.warnings = [...(fromLink.warnings || []), '选区过大，已截断后再解析']
+        fromLink.warnings = [...(fromLink.warnings || []), OVERSIZED_SELECTION_WARNING]
       }
       // Same cleanUrl / key normalize path as mixed/json/env results
       return finalizeResult(fromLink, cleaned)
@@ -129,7 +185,7 @@ export function parseShareText(text) {
   const mixed = tryParseMixed(cleaned)
   const result = finalizeResult(mergeParseResults([b64, json, toml, env, mixed]), cleaned)
   if (result && oversized) {
-    result.warnings = [...(result.warnings || []), '选区过大，已截断后再解析']
+    result.warnings = [...(result.warnings || []), OVERSIZED_SELECTION_WARNING]
   }
   return result
 }
@@ -414,6 +470,9 @@ function finalizeResult(result, text = '') {
   if (typeof result.confidence === 'number') {
     result.confidence = Math.min(1, Math.max(0, result.confidence))
   }
+  result.warnings = Array.from(
+    new Set([...(result.warnings || []), ...buildWarnings(result)]),
+  )
   return result
 }
 
@@ -458,8 +517,8 @@ function applyKeyPrefixHints(key, text) {
  */
 export function looksLikeConfig(text) {
   if (!text || text.trim().length < MIN_SELECTION_LEN) return false
-  let t = repairBrokenBase64(normalizeShareText(text))
-  if (t.length > MAX_SELECTION_LEN) t = t.slice(0, MAX_SELECTION_LEN)
+  const sampled = sampleSelection(normalizeShareText(text))
+  let t = repairBrokenBase64(sampled.text)
   // Provider deeplink → yes. Non-provider deeplink → strip and keep scanning for
   // ordinary endpoint/key shares that may follow (do not hard-return false).
   const deeplinks = extractDeeplinks(t)
@@ -489,7 +548,17 @@ export function looksLikeConfig(text) {
   if (/https?:\/\//i.test(t) && /[A-Za-z0-9+/]{32,}={0,2}/.test(t)) return true
   // standalone base64 only if it decodes to a key or config-shaped text (avoid AAAA… noise)
   if (hasUsefulBase64Blob(t)) return true
-  if (/\{[\s\S]*"(?:apiKey|api_key|baseUrl|endpoint|base_url)"[\s\S]*\}/.test(t)) return true
+  if (
+    t.includes('{') &&
+    t.includes('}') &&
+    /"(?:apiKey|api_key|baseUrl|endpoint|base_url)"\s*:/.test(t)
+  ) {
+    return true
+  }
+  // Oversized selections stay actionable even when the only configuration is
+  // in the omitted middle. The confirmation flow can then explain that the
+  // user must select a smaller block instead of silently hiding the trigger.
+  if (sampled.oversized) return true
   return false
 }
 
@@ -628,13 +697,20 @@ export const MAX_DEEPLINK_LEN = 8000
  * @param {ParseResult} result
  * @param {AppKind} [appOverride]
  * @param {object} [modelInfo] - Optional model extraction result
- * @param {{ includeConfig?: boolean }} [options]
+ * @param {{ includeConfig?: boolean, includeRiskyParams?: boolean }} [options]
  * @returns {string}
  */
 export function buildDeeplink(result, appOverride, modelInfo, options) {
+  if (result.unsupportedApp) {
+    throw new Error(`不支持将 ${result.unsupportedApp} provider 改写为 Claude Code 或 Codex`)
+  }
   const app = appOverride || result.app
   if (!app) {
     throw new Error('app is required (claude or codex)')
+  }
+  const endpointPolicy = inspectEndpoint(result.endpoint)
+  if (!endpointPolicy.valid) {
+    throw new Error(`endpoint 已阻止：${endpointPolicy.error}`)
   }
 
   const params = new URLSearchParams()
@@ -645,7 +721,21 @@ export function buildDeeplink(result, appOverride, modelInfo, options) {
   if (result.endpoint) params.set('endpoint', result.endpoint)
   if (result.apiKey) params.set('apiKey', result.apiKey)
 
-  const includeConfig = !options || options.includeConfig !== false
+  if (result.providerParams && typeof result.providerParams === 'object') {
+    for (const [name, value] of Object.entries(result.providerParams)) {
+      if (
+        value != null &&
+        (SAFE_PROVIDER_PARAM_NAMES.has(name) || options?.includeRiskyParams === true)
+      ) {
+        params.set(name, String(value))
+      }
+    }
+  }
+
+  const includeConfig =
+    options && Object.prototype.hasOwnProperty.call(options, 'includeConfig')
+      ? options.includeConfig !== false
+      : shouldIncludeFullConfigByDefault(result.config)
   if (includeConfig && result.config) {
     params.set('config', base64Encode(result.config))
     params.set('configFormat', result.configFormat || 'json')
@@ -662,7 +752,44 @@ export function buildDeeplink(result, appOverride, modelInfo, options) {
   }
 
   // URLSearchParams encodes spaces as +, deep links often prefer %20 — fine for most handlers
-  return `ccswitch://v1/import?${params.toString()}`
+  const deeplink = `ccswitch://v1/import?${params.toString()}`
+  if (deeplink.length > MAX_DEEPLINK_LEN) {
+    const error = new Error(
+      `深链过长（${deeplink.length} 字符，安全上限 ${MAX_DEEPLINK_LEN}）；请缩短字段或取消携带完整/风险配置`,
+    )
+    error.code = 'DEEPLINK_TOO_LONG'
+    error.length = deeplink.length
+    throw error
+  }
+  return deeplink
+}
+
+/**
+ * Disclose optional provider-deeplink parameter names without exposing values.
+ * Safe metadata is retained automatically; risky and unknown parameters require
+ * an explicit inclusion choice at the UI boundary.
+ * @param {Record<string, unknown>|null|undefined} providerParams
+ */
+export function describeProviderParams(providerParams) {
+  if (!providerParams || typeof providerParams !== 'object') return null
+  const fields = Object.keys(providerParams)
+  const safeFields = fields.filter((name) => SAFE_PROVIDER_PARAM_NAMES.has(name))
+  const riskyFields = fields.filter((name) => RISKY_PROVIDER_PARAM_NAMES.has(name))
+  const unknownFields = fields.filter(
+    (name) =>
+      !SAFE_PROVIDER_PARAM_NAMES.has(name) && !RISKY_PROVIDER_PARAM_NAMES.has(name),
+  )
+  const riskReasons = []
+  if (riskyFields.length) riskReasons.push(`高风险深链参数：${riskyFields.join('、')}`)
+  if (unknownFields.length) riskReasons.push(`未知深链参数：${unknownFields.join('、')}`)
+  return {
+    fields,
+    safeFields,
+    riskyFields,
+    unknownFields,
+    risky: riskReasons.length > 0,
+    riskReasons,
+  }
 }
 
 /**
@@ -696,20 +823,15 @@ export function describeConfigPayload(config) {
     const obj = JSON.parse(raw)
     if (obj && typeof obj === 'object' && !Array.isArray(obj)) {
       fields = Object.keys(obj)
-      if (obj.env && typeof obj.env === 'object' && !Array.isArray(obj.env)) {
-        envFields = Object.keys(obj.env)
-      }
-      const riskyNames = fields.filter((k) => isRiskyConfigFieldName(k))
-      if (riskyNames.length) {
-        riskReasons.push(`高风险字段：${riskyNames.slice(0, 6).join('、')}`)
-      }
-      const unknown = fields.filter((k) => !isKnownConfigFieldName(k))
-      if (unknown.length >= 4) {
-        riskReasons.push(`较多未知附加字段（${unknown.length}）`)
-      }
+      const inspection = inspectConfigObject(obj)
+      envFields = inspection.envFields
+      riskReasons.push(...inspection.riskReasons)
+    } else {
+      riskReasons.push('配置根节点不是普通 JSON 对象')
     }
   } catch {
     fields = []
+    riskReasons.push('配置不是可解析的 JSON')
   }
   return {
     fields,
@@ -720,30 +842,55 @@ export function describeConfigPayload(config) {
   }
 }
 
-/** Top-level keys that are expected for ordinary provider env-shaped configs. */
+/** Keys that are expected in ordinary provider env-shaped configs. */
 const KNOWN_CONFIG_FIELDS = new Set([
   'env',
+  'environment',
+  'settings',
   'name',
+  'title',
+  'label',
+  'provider',
+  'providername',
+  '_type',
+  'type',
   'baseUrl',
+  'baseURL',
   'base_url',
+  'apiBase',
+  'api_base',
   'endpoint',
+  'url',
+  'host',
   'apiKey',
   'api_key',
+  'key',
+  'token',
   'authToken',
   'auth_token',
   'model',
   'models',
+  'haikuModel',
+  'sonnetModel',
+  'opusModel',
+  'homepage',
   'websiteUrl',
   'website_url',
   'notes',
   'icon',
+  'enabled',
+  'usageEnabled',
+  'usageAutoInterval',
 ])
+const KNOWN_CONFIG_FIELDS_LOWER = new Set(
+  Array.from(KNOWN_CONFIG_FIELDS, (name) => name.toLowerCase()),
+)
 
 /**
  * @param {string} name
  */
 function isKnownConfigFieldName(name) {
-  return KNOWN_CONFIG_FIELDS.has(String(name || ''))
+  return KNOWN_CONFIG_FIELDS_LOWER.has(String(name || '').toLowerCase())
 }
 
 /**
@@ -752,12 +899,100 @@ function isKnownConfigFieldName(name) {
  */
 function isRiskyConfigFieldName(name) {
   const k = String(name || '')
-  if (/usageScript|usage_script|usageAccessToken|usage_access_token/i.test(k)) return true
+  if (
+    /usageScript|usage_script|usageApiKey|usage_api_key|usageBaseUrl|usage_base_url|usageAccessToken|usage_access_token|usageUserId|usage_user_id/i.test(
+      k,
+    )
+  ) {
+    return true
+  }
+  if (/configUrl|config_url|remote|download|fetch/i.test(k)) return true
   if (/script|command|hook|eval|exec/i.test(k)) return true
+  if (/^(?:path|pythonpath|node_path|classpath|library_path)$/i.test(k)) return true
   if (/access.?token|password|secret|private.?key/i.test(k) && !/^api[_-]?key$/i.test(k)) {
     return true
   }
   return false
+}
+
+function isKnownProviderEnvName(name) {
+  const k = String(name || '').toUpperCase()
+  if (ENV_URL_KEYS.includes(k) || ENV_KEY_KEYS.includes(k)) return true
+  if (/^(?:ANTHROPIC|CLAUDE|OPENAI|CODEX)_(?:DEFAULT_)?(?:HAIKU_|SONNET_|OPUS_)?MODEL$/.test(k)) {
+    return true
+  }
+  return /^(?:ANTHROPIC|CLAUDE|OPENAI|CODEX)_(?:BASE_URL|API_BASE|API_BASE_URL|API_KEY|AUTH_TOKEN|API_TOKEN|MODEL)$/.test(
+    k,
+  )
+}
+
+function isRiskyEnvName(name) {
+  const k = String(name || '').toUpperCase()
+  if (RISKY_ENV_NAMES.has(k)) return true
+  return /(?:^|_)(?:SCRIPT|COMMAND|HOOK|EVAL|EXEC|PRELOAD|STARTUP|SHELL|PATH)(?:_|$)/.test(k)
+}
+
+function inspectConfigObject(root) {
+  const envFields = new Set()
+  const riskyFields = new Set()
+  const unknownFields = new Set()
+  const riskyEnvFields = new Set()
+  const unknownEnvFields = new Set()
+  let fieldCount = 0
+  let depthExceeded = false
+  let fieldCountExceeded = false
+
+  const visit = (value, depth, envContext) => {
+    if (!value || typeof value !== 'object') return
+    if (depth > MAX_CONFIG_DEPTH) {
+      depthExceeded = true
+      return
+    }
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item, depth + 1, envContext)
+      return
+    }
+
+    for (const [name, child] of Object.entries(value)) {
+      fieldCount++
+      if (fieldCount > MAX_CONFIG_FIELDS) {
+        fieldCountExceeded = true
+        return
+      }
+
+      if (envContext) {
+        envFields.add(name)
+        if (isRiskyEnvName(name)) riskyEnvFields.add(name)
+        else if (!isKnownProviderEnvName(name)) unknownEnvFields.add(name)
+      } else if (isRiskyConfigFieldName(name)) {
+        riskyFields.add(name)
+      } else if (!isKnownConfigFieldName(name)) {
+        unknownFields.add(name)
+      }
+
+      const childIsEnv = /^(?:env|environment)$/i.test(name)
+      visit(child, depth + 1, envContext || childIsEnv)
+      if (fieldCountExceeded) return
+    }
+  }
+
+  visit(root, 0, false)
+  const riskReasons = []
+  if (riskyFields.size) {
+    riskReasons.push(`高风险字段：${Array.from(riskyFields).slice(0, 8).join('、')}`)
+  }
+  if (unknownFields.size) {
+    riskReasons.push(`未知配置字段：${Array.from(unknownFields).slice(0, 8).join('、')}`)
+  }
+  if (riskyEnvFields.size) {
+    riskReasons.push(`高风险环境变量：${Array.from(riskyEnvFields).slice(0, 8).join('、')}`)
+  }
+  if (unknownEnvFields.size) {
+    riskReasons.push(`未知环境变量：${Array.from(unknownEnvFields).slice(0, 8).join('、')}`)
+  }
+  if (depthExceeded) riskReasons.push(`配置嵌套超过安全深度 ${MAX_CONFIG_DEPTH}`)
+  if (fieldCountExceeded) riskReasons.push(`配置字段超过安全上限 ${MAX_CONFIG_FIELDS}`)
+  return { envFields: Array.from(envFields), riskReasons }
 }
 
 /**
@@ -797,12 +1032,16 @@ export function classifyApp(text, fields = {}) {
   const endpoint = String(fields.endpoint || '').toLowerCase()
   const name = String(fields.name || '').toLowerCase()
   const config = String(fields.config || '').toLowerCase()
+  const rawSignals = `${String(text || '')}\n${config}`
   // Free text without model-id noise (relay posts list many models)
-  const prose = stripModelTokens(String(text || '').toLowerCase())
-  const blob = [prose, endpoint, key, name, config].join('\n')
+  const prose = stripModelTokens(stripStructuredEnvNames(String(text || '').toLowerCase()))
+  const blob = [prose, endpoint, key, name, stripStructuredEnvNames(config)].join('\n')
 
   let claude = 0
   let codex = 0
+
+  if (/\b(?:ANTHROPIC|CLAUDE)_[A-Z0-9_]+\b/i.test(rawSignals)) claude += 2
+  if (/\b(?:OPENAI|CODEX)_[A-Z0-9_]+\b/i.test(rawSignals)) codex += 2
 
   if (/sk-ant-/.test(key) || /sk-ant-/.test(blob)) claude += 3
   if (/anthropic/.test(blob)) claude += 2
@@ -904,6 +1143,8 @@ function emptyResult(partial) {
     candidates: [],
     warnings: [],
     deeplink: null,
+    providerParams: null,
+    unsupportedApp: null,
     ...partial,
   }
 }
@@ -952,10 +1193,18 @@ function parseDeeplink(link) {
     const params = new URLSearchParams(qs)
     const resource = params.get('resource')
     if (resource !== 'provider') return null
-    const app = normalizeApp(params.get('app'))
+    const rawApp = params.get('app')
+    const app = normalizeApp(rawApp)
+    const unsupportedApp = rawApp && !app ? rawApp : null
     const name = params.get('name') || defaultName()
     const endpoint = params.get('endpoint') || params.get('baseUrl') || null
     const apiKey = params.get('apiKey') || params.get('api_key') || null
+    const providerParams = Object.create(null)
+    for (const [paramName, value] of params) {
+      if (!CONSUMED_PROVIDER_PARAM_NAMES.has(paramName)) {
+        providerParams[paramName] = value
+      }
+    }
     let config = null
     let configFormat = null
     const configB64 = params.get('config')
@@ -972,10 +1221,12 @@ function parseDeeplink(link) {
     return emptyResult({
       name,
       app,
+      unsupportedApp,
       endpoint,
       apiKey,
       config,
       configFormat,
+      providerParams: Object.keys(providerParams).length ? providerParams : null,
       source: 'deeplink',
       confidence,
     })
@@ -1096,7 +1347,10 @@ function extractJsonishFields(text) {
   const result = { endpoint: null, apiKey: null, name: null, hit: false }
 
   // Must look like JSON-ish (brace + quoted key) before we try loose extraction
-  if (!/\{[\s\S]*["'](?:key|apiKey|api_key|url|baseUrl|base_url|endpoint)["']\s*:/i.test(text)) {
+  if (
+    !text.includes('{') ||
+    !/["'](?:key|apiKey|api_key|url|baseUrl|base_url|endpoint)["']\s*:/i.test(text)
+  ) {
     return result
   }
 
@@ -1131,48 +1385,122 @@ function extractJsonishFields(text) {
 }
 
 function extractJsonObjects(text) {
-  const results = []
   const limit = Math.min(text.length, MAX_SELECTION_LEN)
+  const stack = []
+  const pairs = []
+  let inStr = false
+  let esc = false
+
   for (let i = 0; i < limit; i++) {
-    if (text[i] !== '{') continue
-    if (results.length >= MAX_JSON_OBJECTS) break
-    let depth = 0
-    let inStr = false
-    let esc = false
-    // Cap scan window per brace so pathological unclosed `{` runs stay linear-ish
-    const end = Math.min(limit, i + MAX_DECODED_LEN)
-    for (let j = i; j < end; j++) {
-      const c = text[j]
-      if (inStr) {
-        if (esc) {
-          esc = false
-        } else if (c === '\\') {
-          esc = true
-        } else if (c === '"') {
-          inStr = false
-        }
-        continue
+    const c = text[i]
+    if (inStr) {
+      if (esc) {
+        esc = false
+      } else if (c === '\\') {
+        esc = true
+      } else if (c === '"') {
+        inStr = false
+      } else if (c === '\n' || c === '\r') {
+        // Raw line breaks are invalid inside JSON strings. Recover here so an
+        // earlier malformed fragment cannot hide a later valid object.
+        inStr = false
       }
-      if (c === '"') {
-        inStr = true
-        continue
-      }
-      if (c === '{') depth++
-      else if (c === '}') {
-        depth--
-        if (depth === 0) {
-          results.push(text.slice(i, j + 1))
-          i = j
-          break
-        }
+      continue
+    }
+
+    if (c === '"' && stack.length > 0) {
+      inStr = true
+      continue
+    }
+    if (c === '{') {
+      stack.push(i)
+    } else if (c === '}' && stack.length > 0) {
+      const start = stack.pop()
+      if (i - start + 1 <= MAX_DECODED_LEN) {
+        pairs.push({ start, end: i + 1 })
       }
     }
   }
-  return results
+
+  // Closing order lists nested pairs before their enclosing pair. Walking it
+  // backwards therefore sees each maximal pair first; one interval comparison
+  // removes its nested pairs without a sort or suffix rescan.
+  const maximalReversed = []
+  let currentOuter = null
+  for (let i = pairs.length - 1; i >= 0; i--) {
+    const pair = pairs[i]
+    if (!currentOuter || pair.end <= currentOuter.start) {
+      maximalReversed.push(pair)
+      currentOuter = pair
+    }
+  }
+  return maximalReversed
+    .reverse()
+    .slice(0, MAX_JSON_OBJECTS)
+    .map((pair) => text.slice(pair.start, pair.end))
+}
+
+function stripStructuredEnvNames(s) {
+  return String(s || '').replace(/\b(?:ANTHROPIC|CLAUDE|OPENAI|CODEX)_[A-Z0-9_]+\b/gi, ' ')
+}
+
+function sampleSelection(text) {
+  const raw = String(text || '')
+  if (raw.length <= MAX_SELECTION_LEN) return { text: raw, oversized: false }
+
+  const contentBudget = MAX_SELECTION_LEN - SELECTION_OMISSION_MARKER.length
+  const headLength = Math.ceil(contentBudget / 2)
+  const tailLength = contentBudget - headLength
+  return {
+    text:
+      raw.slice(0, headLength) +
+      SELECTION_OMISSION_MARKER +
+      raw.slice(raw.length - tailLength),
+    oversized: true,
+  }
 }
 
 function isHttpUrl(value) {
   return typeof value === 'string' && /^https?:\/\//i.test(value.trim())
+}
+
+function inspectEndpoint(value) {
+  if (value == null || String(value).trim() === '') {
+    return { valid: true, warning: null, error: null }
+  }
+  let url
+  try {
+    url = new URL(String(value).trim())
+  } catch {
+    return { valid: false, warning: null, error: '不是有效 URL' }
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    return { valid: false, warning: null, error: '仅支持 HTTP(S) 协议' }
+  }
+  if (!url.hostname) {
+    return { valid: false, warning: null, error: 'URL 缺少主机名' }
+  }
+  if (url.username || url.password) {
+    return { valid: false, warning: null, error: 'URL 不得包含用户名或密码凭据' }
+  }
+  if (url.protocol === 'http:' && !isLoopbackHostname(url.hostname)) {
+    return {
+      valid: true,
+      warning: '非本机 HTTP endpoint 未加密，API Key 可能以明文传输',
+      error: null,
+    }
+  }
+  return { valid: true, warning: null, error: null }
+}
+
+function isLoopbackHostname(hostname) {
+  const host = String(hostname || '')
+    .toLowerCase()
+    .replace(/^\[|\]$/g, '')
+    .replace(/\.$/, '')
+  if (host === 'localhost' || host.endsWith('.localhost')) return true
+  if (host === '::1' || host === '0:0:0:0:0:0:0:1') return true
+  return /^127(?:\.\d{1,3}){0,3}$/.test(host)
 }
 
 function pickProviderFields(obj) {
@@ -2174,8 +2502,10 @@ function buildWarnings(fields) {
   const w = []
   if (fields.endpoint && !fields.apiKey) w.push('未识别到 API Key，仍可尝试导入')
   if (!fields.endpoint && fields.apiKey) w.push('未识别到 endpoint/base URL，仍可尝试导入')
-  if (fields.endpoint && !/^https?:\/\//i.test(fields.endpoint)) {
-    w.push('endpoint 不是 http(s) URL')
+  if (fields.endpoint) {
+    const endpointPolicy = inspectEndpoint(fields.endpoint)
+    if (!endpointPolicy.valid) w.push(`endpoint 已阻止：${endpointPolicy.error}`)
+    else if (endpointPolicy.warning) w.push(endpointPolicy.warning)
   }
   if (fields.apiKey) {
     const k = String(fields.apiKey)

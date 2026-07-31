@@ -10,10 +10,16 @@ import {
   selectCandidate,
   enrichTextWithAnchorHrefs,
   describeConfigPayload,
+  describeProviderParams,
   shouldIncludeFullConfigByDefault,
   MAX_DEEPLINK_LEN,
+  MAX_SELECTION_LEN,
 } from './lib/core.mjs'
-import { extractModels, filterModelsForApp } from './lib/model-extractor.mjs'
+import {
+  chooseModelForApp,
+  extractModels,
+  filterModelsForApp,
+} from './lib/model-extractor.mjs'
 
 /* global GM_setClipboard, GM_notification, __SCRIPT_VERSION__ */
 // Replaced at build time by scripts/build.mjs (esbuild define).
@@ -30,8 +36,13 @@ let currentModelInfo = null
 let currentDeeplink = null
 /** @type {string|null} */
 let selectedModel = null
+let manualModelSelection = false
 /** When result has full config, default on; user can uncheck to export endpoint/key only. */
 let includeFullConfig = true
+/** Risky or unknown optional provider params always require an explicit opt-in. */
+let includeRiskyParams = false
+let deeplinkError = null
+let previouslyFocused = null
 
 function ensureRoot() {
   let host = document.getElementById(ROOT_ID)
@@ -177,10 +188,10 @@ function getUi() {
     overlay.id = 'overlay'
     overlay.className = 'ccs-overlay'
     overlay.innerHTML = `
-      <div class="ccs-card" role="dialog" aria-modal="true">
-        <h2>导入到 CC Switch</h2>
+      <div class="ccs-card" role="dialog" aria-modal="true" aria-labelledby="dialog-title" aria-describedby="warn err" tabindex="-1">
+        <h2 id="dialog-title">导入到 CC Switch</h2>
         <div class="ccs-meta" id="meta"></div>
-        <div class="ccs-err" id="err" style="display:none"></div>
+        <div class="ccs-err" id="err" role="alert" aria-live="assertive" style="display:none"></div>
         <div class="ccs-fields" id="fields"></div>
         <div class="ccs-cand" id="cand">
           <button type="button" id="cand-prev" aria-label="上一组候选">‹</button>
@@ -198,7 +209,14 @@ function getUi() {
             <div class="ccs-config-meta" id="config-meta"></div>
           </span>
         </label>
-        <div class="ccs-warn" id="warn"></div>
+        <label class="ccs-config-opt" id="provider-opt">
+          <input type="checkbox" id="include-provider-params" />
+          <span>
+            <span>携带风险/未知附加参数</span>
+            <div class="ccs-config-meta" id="provider-meta"></div>
+          </span>
+        </label>
+        <div class="ccs-warn" id="warn" role="status" aria-live="polite"></div>
         <div class="ccs-apps">
           <button type="button" data-app="claude" id="app-claude">Claude Code</button>
           <button type="button" data-app="codex" id="app-codex">Codex</button>
@@ -218,6 +236,8 @@ function getUi() {
     toast = document.createElement('div')
     toast.id = 'toast'
     toast.className = 'ccs-toast'
+    toast.setAttribute('role', 'status')
+    toast.setAttribute('aria-live', 'polite')
     shadow.appendChild(toast)
 
     shadow.getElementById('cancel').addEventListener('click', closeCard)
@@ -229,6 +249,9 @@ function getUi() {
     shadow.getElementById('cand-next').addEventListener('click', () => shiftCandidate(1))
     shadow.getElementById('model-select').addEventListener('change', onModelSelect)
     shadow.getElementById('include-config').addEventListener('change', onIncludeConfigChange)
+    shadow
+      .getElementById('include-provider-params')
+      .addEventListener('change', onIncludeProviderParamsChange)
   }
   return { shadow, btn, overlay, toast }
 }
@@ -369,35 +392,33 @@ function scheduleUpdate() {
 function onImportClick(e) {
   e.preventDefault()
   e.stopPropagation()
+  previouslyFocused = e.currentTarget
   const text = lastSelectionText || getSelectionText()
   const { btn } = getUi()
   btn.classList.remove('show')
 
   const result = parseShareText(text)
   if (!result) {
-    openErrorCard('未识别到 API 配置。请选中包含 base URL / API Key / ccswitch 深链 / Base64 配置 的文本。')
+    openErrorCard(
+      text.length > MAX_SELECTION_LEN
+        ? '选区过大，配置可能位于未解析的中间部分。请缩小选区，只保留一个完整配置块后重试。'
+        : '未识别到 API 配置。请选中包含 base URL / API Key / ccswitch 深链 / Base64 配置 的文本。',
+    )
     return
   }
   currentResult = result
   selectedApp = result.app
   selectedModel = null
+  manualModelSelection = false
   includeFullConfig = shouldIncludeFullConfigByDefault(result.config)
+  includeRiskyParams = false
   refreshModelInfo(text)
   rebuildDeeplink()
-  // Long full-config deeplinks are unreliable over custom protocols; drop config.
-  if (includeFullConfig && currentDeeplink && currentDeeplink.length > MAX_DEEPLINK_LEN) {
-    includeFullConfig = false
-    rebuildDeeplink()
-    result.warnings = [
-      ...(result.warnings || []),
-      '完整配置生成的深链过长，可能无法唤起 CC Switch。已改为仅导入 endpoint/key。',
-    ]
-  }
   renderCard(result)
 }
 
 /**
- * Recompute models for current app (filters by app when possible).
+ * Recompute models for current app (preferred families sort first; none are removed).
  * @param {string} [sourceText]
  */
 function refreshModelInfo(sourceText) {
@@ -407,25 +428,26 @@ function refreshModelInfo(sourceText) {
       ? extractModels(text)
       : { model: null, haikuModel: null, sonnetModel: null, opusModel: null, models: [] }
 
-  let models = info.models || []
-  if (typeof filterModelsForApp === 'function' && selectedApp) {
-    models = filterModelsForApp(models, selectedApp)
-  }
-
-  if (selectedModel && models.includes(selectedModel)) {
-    info = { ...info, models, model: selectedModel }
-  } else if (models.length === 1) {
-    selectedModel = models[0]
-    info = { ...info, models, model: models[0] }
-  } else if (models.length > 1) {
+  const detectedModels = info.models || []
+  if (detectedModels.length) {
     const preferred =
-      (info.model && models.includes(info.model) && info.model) ||
-      models.find((m) => /sonnet/i.test(m)) ||
-      models[0]
+      typeof chooseModelForApp === 'function'
+        ? chooseModelForApp(
+            detectedModels,
+            selectedApp,
+            manualModelSelection ? selectedModel : null,
+            info.model,
+          )
+        : detectedModels[0]
+    const models =
+      typeof filterModelsForApp === 'function' && selectedApp
+        ? filterModelsForApp(detectedModels, selectedApp)
+        : detectedModels.slice()
     selectedModel = preferred
     info = { ...info, models, model: preferred }
   } else {
     selectedModel = null
+    manualModelSelection = false
     info = {
       model: null,
       haikuModel: null,
@@ -435,6 +457,7 @@ function refreshModelInfo(sourceText) {
     }
   }
 
+  const models = info.models || []
   if (selectedApp === 'claude') {
     info.haikuModel = models.find((m) => /haiku/i.test(m)) || null
     info.sonnetModel = models.find((m) => /sonnet/i.test(m)) || null
@@ -458,7 +481,12 @@ function openErrorCard(msg) {
   shadow.getElementById('config-opt').classList.remove('show')
   shadow.getElementById('include-config').checked = false
   shadow.getElementById('config-meta').textContent = ''
+  shadow.getElementById('provider-opt').classList.remove('show')
+  shadow.getElementById('include-provider-params').checked = false
+  shadow.getElementById('provider-meta').textContent = ''
   includeFullConfig = false
+  includeRiskyParams = false
+  deeplinkError = null
   const err = shadow.getElementById('err')
   err.style.display = 'block'
   err.textContent = msg
@@ -466,18 +494,21 @@ function openErrorCard(msg) {
   shadow.getElementById('app-codex').disabled = true
   shadow.getElementById('open').disabled = true
   shadow.getElementById('copy').disabled = true
-  overlay.classList.add('show')
+  showDialog(overlay, shadow.getElementById('cancel'))
 }
 
 function renderCard(result) {
   const { overlay, shadow } = getUi()
   const err = shadow.getElementById('err')
-  err.style.display = 'none'
-  err.textContent = ''
+  const unsupportedMessage = result.unsupportedApp
+    ? `此深链目标为不支持的应用「${result.unsupportedApp}」，不会改写为 Claude Code 或 Codex。`
+    : ''
+  const blockingMessage = unsupportedMessage || (deeplinkError && deeplinkError.message) || ''
+  err.style.display = blockingMessage ? 'block' : 'none'
+  err.textContent = blockingMessage
   shadow.getElementById('fields').style.display = 'block'
-  shadow.getElementById('app-claude').disabled = false
-  shadow.getElementById('app-codex').disabled = false
-  shadow.getElementById('copy').disabled = false
+  shadow.getElementById('app-claude').disabled = Boolean(result.unsupportedApp)
+  shadow.getElementById('app-codex').disabled = Boolean(result.unsupportedApp)
 
   const conf = Math.round((result.confidence || 0) * 100)
   const modelCount = currentModelInfo?.models?.length || 0
@@ -507,6 +538,10 @@ function renderCard(result) {
       : result.config
         ? { fields: [], sizeBytes: String(result.config).length }
         : null
+  const providerInfo =
+    result.providerParams && typeof describeProviderParams === 'function'
+      ? describeProviderParams(result.providerParams)
+      : null
 
   const fields = shadow.getElementById('fields')
   fields.innerHTML = `
@@ -515,6 +550,13 @@ function renderCard(result) {
     <div><span class="k">apiKey</span>${escapeHtml(maskKey(result.apiKey || '') || '—')}</div>
     <div><span class="k">model</span>${modelLine}</div>
     <div><span class="k">app</span>${escapeHtml(selectedApp || '未选择')}</div>
+    ${
+      providerInfo
+        ? `<div><span class="k">附加参数</span>${escapeHtml(
+            providerInfo.fields.slice(0, 12).join('、'),
+          )}${providerInfo.fields.length > 12 ? '…' : ''}</div>`
+        : ''
+    }
     ${
       configInfo
         ? `<div><span class="k">完整配置</span>${includeFullConfig ? '是（将写入深链）' : '否（仅 endpoint/key）'}</div>
@@ -552,6 +594,28 @@ function renderCard(result) {
   } else {
     configOpt.classList.remove('show')
     configMeta.textContent = ''
+  }
+
+  const providerOpt = shadow.getElementById('provider-opt')
+  const includeProviderCb = shadow.getElementById('include-provider-params')
+  const providerMeta = shadow.getElementById('provider-meta')
+  if (providerInfo?.risky) {
+    providerOpt.classList.add('show')
+    includeProviderCb.checked = includeRiskyParams
+    providerMeta.textContent = [
+      providerInfo.riskyFields.length
+        ? `高风险：${providerInfo.riskyFields.slice(0, 6).join('、')}`
+        : '',
+      providerInfo.unknownFields.length
+        ? `未知：${providerInfo.unknownFields.slice(0, 6).join('、')}`
+        : '',
+    ]
+      .filter(Boolean)
+      .join(' · ')
+  } else {
+    providerOpt.classList.remove('show')
+    includeProviderCb.checked = false
+    providerMeta.textContent = ''
   }
 
   const candEl = shadow.getElementById('cand')
@@ -593,6 +657,11 @@ function renderCard(result) {
           : ''),
     )
   }
+  if (providerInfo?.risky) {
+    warnings.push(
+      `风险/未知附加参数默认不携带（${providerInfo.riskReasons.join('；')}）`,
+    )
+  }
   if (
     includeFullConfig &&
     currentDeeplink &&
@@ -605,8 +674,17 @@ function renderCard(result) {
   warn.textContent = warnings.join('；')
 
   syncAppButtons()
-  shadow.getElementById('open').disabled = !selectedApp
-  overlay.classList.add('show')
+  const blocked = !selectedApp || Boolean(result.unsupportedApp) || !currentDeeplink
+  shadow.getElementById('open').disabled = blocked
+  shadow.getElementById('copy').disabled = blocked
+  showDialog(
+    overlay,
+    selectedApp
+      ? shadow.getElementById('open')
+      : result.unsupportedApp
+        ? shadow.getElementById('cancel')
+        : shadow.getElementById('app-claude'),
+  )
 }
 
 function shiftCandidate(delta) {
@@ -622,6 +700,7 @@ function shiftCandidate(delta) {
 function onModelSelect(e) {
   const v = e.target && e.target.value
   selectedModel = v || null
+  manualModelSelection = Boolean(selectedModel)
   if (currentModelInfo) {
     currentModelInfo = { ...currentModelInfo, model: selectedModel }
   }
@@ -632,17 +711,12 @@ function onModelSelect(e) {
 function onIncludeConfigChange(e) {
   includeFullConfig = !!(e.target && e.target.checked)
   rebuildDeeplink()
-  if (
-    includeFullConfig &&
-    currentDeeplink &&
-    currentDeeplink.length > MAX_DEEPLINK_LEN
-  ) {
-    includeFullConfig = false
-    rebuildDeeplink()
-    const { shadow } = getUi()
-    shadow.getElementById('include-config').checked = false
-    showToast('完整配置生成的深链过长，可能无法唤起 CC Switch。建议仅导入 endpoint/key。', 4200)
-  }
+  if (currentResult) renderCard(currentResult)
+}
+
+function onIncludeProviderParamsChange(e) {
+  includeRiskyParams = !!(e.target && e.target.checked)
+  rebuildDeeplink()
   if (currentResult) renderCard(currentResult)
 }
 
@@ -654,6 +728,7 @@ function formatBytes(n) {
 }
 
 function setApp(app) {
+  if (currentResult?.unsupportedApp) return
   selectedApp = app
   refreshModelInfo()
   rebuildDeeplink()
@@ -668,6 +743,7 @@ function syncAppButtons() {
 
 function rebuildDeeplink() {
   currentDeeplink = null
+  deeplinkError = null
   if (!currentResult || !selectedApp) return
   try {
     const modelInfo = currentModelInfo
@@ -675,15 +751,41 @@ function rebuildDeeplink() {
       : null
     currentDeeplink = buildDeeplink(currentResult, selectedApp, modelInfo, {
       includeConfig: includeFullConfig,
+      includeRiskyParams,
     })
   } catch (e) {
     currentDeeplink = null
+    deeplinkError = e instanceof Error ? e : new Error(String(e || '无法生成深链'))
+  }
+}
+
+function showDialog(overlay, preferredFocus) {
+  const wasOpen = overlay.classList.contains('show')
+  if (!wasOpen && !previouslyFocused) {
+    const { shadow } = getUi()
+    previouslyFocused = shadow.activeElement || document.activeElement
+  }
+  overlay.classList.add('show')
+  if (!wasOpen) {
+    requestAnimationFrame(() => {
+      const card = overlay.querySelector('.ccs-card')
+      const target =
+        preferredFocus && !preferredFocus.disabled ? preferredFocus : card
+      if (target && typeof target.focus === 'function') target.focus()
+    })
   }
 }
 
 function closeCard() {
   const { overlay } = getUi()
+  if (!overlay.classList.contains('show')) return
   overlay.classList.remove('show')
+  const restore = previouslyFocused
+  previouslyFocused = null
+  if (restore?.id === 'btn') updateSelectionUi()
+  if (restore && restore.isConnected && typeof restore.focus === 'function') {
+    requestAnimationFrame(() => restore.focus())
+  }
 }
 
 function copyText(text) {
@@ -711,7 +813,7 @@ function copyText(text) {
 
 function copyDeeplink(fromBtn) {
   if (!currentDeeplink) {
-    showToast('请先选择 Claude Code 或 Codex')
+    showToast(deeplinkError?.message || '请先选择 Claude Code 或 Codex')
     return
   }
   copyText(currentDeeplink).then((ok) => {
@@ -731,7 +833,7 @@ function openImport() {
   }
   rebuildDeeplink()
   if (!currentDeeplink) {
-    showToast('无法生成深链')
+    showToast(deeplinkError?.message || '无法生成深链')
     return
   }
 
@@ -762,7 +864,34 @@ function escapeHtml(s) {
 }
 
 function onKeydown(e) {
-  if (e.key === 'Escape') closeCard()
+  const { overlay, shadow } = getUi()
+  if (!overlay.classList.contains('show')) return
+  if (e.key === 'Escape') {
+    e.preventDefault()
+    closeCard()
+    return
+  }
+  if (e.key !== 'Tab') return
+
+  const focusable = Array.from(
+    overlay.querySelectorAll(
+      'button:not([disabled]), select:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])',
+    ),
+  ).filter((element) => element.getClientRects().length > 0)
+  if (!focusable.length) {
+    e.preventDefault()
+    overlay.querySelector('.ccs-card')?.focus()
+    return
+  }
+  const active = shadow.activeElement
+  const index = focusable.indexOf(active)
+  if (e.shiftKey && index <= 0) {
+    e.preventDefault()
+    focusable[focusable.length - 1].focus()
+  } else if (!e.shiftKey && (index < 0 || index === focusable.length - 1)) {
+    e.preventDefault()
+    focusable[0].focus()
+  }
 }
 
 function init() {

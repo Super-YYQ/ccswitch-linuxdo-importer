@@ -13,14 +13,14 @@
 |------|------|
 | 触发方式 | 选中文本 → 悬浮按钮 → 确认卡（不监听剪贴板） |
 | 作用站点 | 仅 `linux.do` / `www.linux.do` |
-| 目标应用 | 自动识别 Claude Code / Codex；不明时手选 |
-| 模型识别 | 从文案提取 `gpt-*` / `claude-*` / `grok-*` 等，写入深链 `model` 等参数；仅一个模型时自动作为默认 |
-| 导入方式 | `ccswitch://v1/import?...`；唤起失败则复制深链 |
+| 目标应用 | 自动识别 Claude Code / Codex；不明时手选；其他应用深链会明确阻止改写 |
+| 模型识别 | 从文案提取并保留精确 `gpt-*` / `claude-*` / `grok-*` 等 ID；按目标应用排序但不删除中转模型 |
+| 导入方式 | `ccswitch://v1/import?...`；唤起失败时由用户点击「复制深链」手动处理 |
 | 隐私 | 纯本地解析，不上传密钥；确认卡中 Key 脱敏 |
 
 ### 支持的分享格式
 
-1. **官方深链** — `ccswitch://v1/import?...`
+1. **官方深链** — `ccswitch://v1/import?...`（Claude Code / Codex；安全元数据会保留，风险或未知参数需显式勾选）
 2. **Base64** — 整段配置或单独的 Key（自动解码 `sk-` / `sk-ant-` / `g2a_` / `tp-` / `ark-` / `xai-` / `gsk_` / `pplx-` / `r8_` / `hf_` / `fw_` 等前缀；无固定前缀的厂商 token 在「base64/64解密」提示 + endpoint 共同出现时也可识别）
 3. **JSON** — `baseUrl` / `endpoint` + `apiKey` 等
 4. **环境变量** — `ANTHROPIC_BASE_URL`、`ANTHROPIC_AUTH_TOKEN`、`OPENAI_*` 等
@@ -42,7 +42,7 @@
    - 或从 [GitHub Releases](https://github.com/Super-YYQ/ccswitch-linuxdo-importer/releases) 下载对应版本的 `.user.js`
 4. 访问 https://linux.do ，在帖子中选中一段配置文字
 
-确认安装版本：打开确认卡后，元信息末尾应显示当前发布版本（例如 **v1.2.9**）。
+确认安装版本：打开确认卡后，元信息末尾应显示当前发布版本（例如 **v1.2.10**）。
 
 > 若你之前从 `main` 安装过旧版：请卸载后按上面的 `release` 链接重装一次，否则自动更新仍会指向已废弃的 main 产物路径。
 
@@ -54,8 +54,9 @@
 2. 点击蓝色悬浮按钮 **「导入 ccSwitch」**
 3. 在确认卡检查：
    - `endpoint` / 脱敏 `apiKey`
-   - `model`（多模型时可下拉切换；会按 Claude/Codex 过滤）
+   - `model`（多模型时可下拉切换；按 Claude/Codex 优先排序，其他中转模型仍保留）
    - 多组 URL/Key 时可用 ‹ › 切换候选
+   - 完整配置及风险/未知深链参数的字段名与默认携带状态
    - Claude Code / Codex 目标栏
 4. 点 **「打开导入」** 唤起 CC Switch  
    若无反应：点 **「复制深链」** 粘贴到地址栏，或检查 CC Switch 是否已注册协议  
@@ -67,7 +68,8 @@
 | 情况 | 行为 |
 |------|------|
 | 文案中只出现 **1 个** 可识别模型 | 自动作为默认 `model` 写入深链 |
-| 出现 **多个** 模型 | 优先 sonnet / 主模型写入 `model`；Claude 下额外尝试 `haikuModel` / `sonnetModel` / `opusModel` |
+| 出现 **多个** 模型 | Claude 优先 Sonnet/Claude 系列，Codex 优先 GPT/o 系列；手工选择只要仍有效就保留，其他中转模型不删除 |
+| Claude 快照 / 别名 | 保留原始精确 ID，例如 `claude-sonnet-4-5-20250929` 不会缩成 `claude-sonnet-4-5` |
 | 只有「支持所有模型」等描述、无具体 ID | 不写入模型参数 |
 | 深链参数 | 使用官方协议：`model`、`haikuModel`、`sonnetModel`、`opusModel`（见 [CC Switch 深链文档](https://github.com/farion1231/cc-switch/blob/main/docs/user-manual/en/5-faq/5.3-deeplink.md)） |
 
@@ -117,6 +119,9 @@ npm ci
 # 单元测试
 npm test
 
+# Chromium 浏览器测试（首次需 `npx playwright install chromium`）
+npm run test:browser
+
 # 用 esbuild 将 ESM 源码打包为油猴 IIFE 单文件（本地产物，不提交到 main）
 npm run build
 
@@ -131,7 +136,8 @@ npm run check
 | `userscript/ui-main.js` | 选区 / 确认卡 / 唤起（esbuild 入口，ESM） |
 | `userscript/ccswitch-linuxdo-importer.user.js` | **构建产物**（gitignore；仅 `release` 分支 / Release 资产） |
 | `scripts/build.mjs` | esbuild IIFE + userscript 头（`@updateURL` → `release`） |
-| `tests/*.test.mjs` | 单测 |
+| `tests/*.test.mjs` | 解析、模型与发布守卫单测 |
+| `tests/browser/` | Chromium 中的 Selection / Shadow DOM / 导入交互回归测试 |
 | `docs/superpowers/` | 设计与计划 |
 
 本地验证：`npm run build` 后把生成的 `.user.js` 粘进 Tampermonkey，或用「从磁盘安装」。
@@ -147,7 +153,7 @@ npm run check
 
 发版步骤：
 
-1. 在 `main` 改完功能，`npm test` / `npm run build` 通过
+1. 在 `main` 改完功能，`npm run check` 通过
 2. 把 `package.json` 版本号改成要发布的版本（如 `1.2.0`）
 3. 合并到 `main` 后打 tag 并推送 tag（**不要**只靠推 main 发版）：
 
@@ -157,12 +163,12 @@ git push origin v1.2.0
 ```
 
 4. GitHub Action `Release`（`.github/workflows/release.yml`）会：
-   - **build Job（contents:read）**：`npm ci` → 测试 → 构建 userscript → 把 `release-guard`（含 semver）esbuild 打成单文件并上传 artifact
+   - **build Job（contents:read）**：`npm ci` → 单测 + Chromium 浏览器测试 → 构建 userscript → 把 `release-guard`（含 semver）esbuild 打成单文件并上传 artifact
    - 校验 tag 与 `package.json` 版本一致（`v1.2.3` ↔ `1.2.3`），且 tag 提交在 `main` 上
    - **publish Job（contents:write）**：**不**再 `npm ci`；用 artifact 里的 `dist/release-guard.mjs` 做 semver + SHA-256 守卫；checkout 无持久凭据，仅最终 `git push` 注入 token
    - 把产物推到 `release` 分支并创建 GitHub Release
 
-CI（`main` / PR）只做 test + build，**不会**更新 `release` 分支。
+CI（`main` / PR）执行 Node 18/20/22 单测、构建及独立 Chromium 浏览器测试，**不会**更新 `release` 分支。
 
 ---
 
@@ -170,6 +176,12 @@ CI（`main` / PR）只做 test + build，**不会**更新 `release` 分支。
 
 - 仅在用户**主动选中并点击**后处理文本
 - Key 在确认卡中脱敏（如 `sk-ant-****xxxx`）
+- 最多处理 64 KiB；超长选区按头尾采样并提示，中间配置会要求缩小选区重试
+- 完整 JSON 配置会递归检查字段；进程控制环境变量、脚本/命令、远程配置及未知字段默认不携带
+- 官方深链的普通元数据默认保留；风险或未知附加参数需用户显式勾选
+- endpoint 只允许 HTTP(S)：本机 HTTP 可用，非本机 HTTP 会警告，内嵌账号密码或其他协议会阻止
+- 所有最终深链统一限制为 8,000 字符；超限时不会打开或复制，也不会静默删减字段
+- 「打开导入」不会自动复制含 Key 的深链；复制始终需要用户主动点击
 - 勿在公共场合长期展示含真实 Key 的截图
 - 本仓库示例中的密钥均为格式样例；真实额度请勿提交到公开仓库
 
@@ -177,6 +189,7 @@ CI（`main` / PR）只做 test + build，**不会**更新 `release` 分支。
 
 ## 变更摘要
 
+- **v1.2.10** — 兼容与安全加固：JSON 扫描改为有界线性处理；超长选区头尾采样；递归配置/env 风险策略；官方 provider 深链安全参数无损保留、风险/未知参数显式选择、阻止不支持应用改写；endpoint 与 8,000 字符统一终检；精确保留 Claude 快照及新增系列；模型默认随目标应用切换且保留手选；确认卡补齐焦点/读屏语义；新增 Chromium 回归门禁
 - **v1.2.9** — Key 以 base64 分享且解码为 `"OPENAI_API_KEY": "sk-…"` 这类**字段片段**时，从包裹文本中抽出真实 key 值；支持 `key ：` 全角标签 + 独立 `base_url` 行、ascii/大写/`api_key`/中文备注标签等变体；随机 base64 噪声不误判
 - **v1.2.8** — 修复跨解析器拼接丢字段：base64 只含 `OPENAI_API_KEY` 字段、endpoint 在另一行（如 `base_url = “…”`）时，合并结果被旧候选覆盖导致 endpoint 丢失；现在候选对与顶层字段保持同步
 - **v1.2.7** — 通用化 Key 识别，大幅降低对固定前缀的依赖：

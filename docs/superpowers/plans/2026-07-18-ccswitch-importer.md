@@ -35,7 +35,7 @@
 
 - [ ] Selection detect + floating button
 - [ ] Confirm card + toast
-- [ ] Deep link open + clipboard fallback
+- [ ] Deep link open + explicit manual clipboard fallback
 - [ ] Commit
 
 ### Task 4: README install docs + final verification
@@ -58,7 +58,7 @@
 | Formats A–E | Task 2 |
 | Auto app classify | Task 2 |
 | ccswitch:// open | Task 2–3 |
-| Clipboard fallback | Task 3 |
+| Explicit clipboard fallback | Task 3 |
 | Anti CJK noise | Task 2 |
 | linux.do only | Task 3 header |
 | Shadow/safe UI | Task 3 |
