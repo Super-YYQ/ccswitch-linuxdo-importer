@@ -107,6 +107,15 @@ const CSS_TEXT = `
     word-break: break-all;
   }
   .ccs-fields .k { color: #868e96; margin-right: 6px; }
+  .ccs-copy-key {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 22px; height: 22px; margin-left: 4px; padding: 4px; vertical-align: middle;
+    border: none; border-radius: 4px; background: transparent; color: #adb5bd;
+    cursor: pointer;
+  }
+  .ccs-copy-key:hover:not(:disabled) { background: #373a40; color: #fff; }
+  .ccs-copy-key:focus-visible { outline: 2px solid #228be6; outline-offset: 2px; }
+  .ccs-copy-key:disabled { opacity: .4; cursor: not-allowed; }
   .ccs-warn {
     font-size: 11px; color: #fcc419; margin: -4px 0 12px; line-height: 1.45;
   }
@@ -547,7 +556,12 @@ function renderCard(result) {
   fields.innerHTML = `
     <div><span class="k">name</span>${escapeHtml(result.name || '')}</div>
     <div><span class="k">endpoint</span>${escapeHtml(result.endpoint || '—')}</div>
-    <div><span class="k">apiKey</span>${escapeHtml(maskKey(result.apiKey || '') || '—')}</div>
+    <div><span class="k">apiKey</span>${escapeHtml(maskKey(result.apiKey || '') || '—')}<button type="button" class="ccs-copy-key" id="copy-key" aria-label="复制 Key" title="复制完整 Key"${result.apiKey ? '' : ' disabled'}>
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+        <rect x="9" y="9" width="13" height="13" rx="2" />
+        <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+      </svg>
+    </button></div>
     <div><span class="k">model</span>${modelLine}</div>
     <div><span class="k">app</span>${escapeHtml(selectedApp || '未选择')}</div>
     ${
@@ -574,6 +588,8 @@ function renderCard(result) {
         : ''
     }
   `
+
+  shadow.getElementById('copy-key').addEventListener('click', copyApiKey)
 
   const configOpt = shadow.getElementById('config-opt')
   const includeCb = shadow.getElementById('include-config')
@@ -808,6 +824,20 @@ function copyText(text) {
     return Promise.resolve(ok)
   } catch {
     return Promise.resolve(false)
+  }
+}
+
+async function copyApiKey() {
+  const apiKey = currentResult?.apiKey
+  if (!apiKey) {
+    showToast('未识别到可复制的 Key')
+    return
+  }
+  try {
+    const ok = await copyText(apiKey)
+    showToast(ok ? 'Key 已复制到剪贴板' : 'Key 复制失败，请重试')
+  } catch {
+    showToast('Key 复制失败，请重试')
   }
 }
 

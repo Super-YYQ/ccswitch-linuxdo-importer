@@ -54,6 +54,102 @@ async function shadowState(page) {
   })
 }
 
+test('copies the complete decoded API key while keeping it masked in the dialog', async ({
+  page,
+}) => {
+  const apiKey = 'sk-ant-api03-TESTONLY-copy-key-browser-fixture'
+  const encodedKey = Buffer.from(apiKey).toString('base64')
+  await installUserscript(
+    page,
+    `base_url = "https://relay.example.invalid/v1"\nkey（base64）：${encodedKey}`,
+  )
+  await selectShare(page)
+
+  const root = page.locator('#ccs-ld-root')
+  await root.locator('#btn').click()
+  const fields = root.locator('#fields')
+  await expect(fields).toContainText('****')
+  await expect(fields).not.toContainText(apiKey)
+  expect(await page.evaluate(() => window.__copiedDeeplinks)).toEqual([])
+
+  const copyKey = root.getByRole('button', { name: '复制 Key', exact: true })
+  await expect(copyKey).toBeVisible()
+  await copyKey.click()
+  await expect
+    .poll(() => page.evaluate(() => window.__copiedDeeplinks))
+    .toEqual([apiKey])
+  await expect(root.locator('#toast')).toHaveText('Key 已复制到剪贴板')
+  await expect(fields).not.toContainText(apiKey)
+  expect(await page.evaluate(() => window.__openedDeeplinks)).toEqual([])
+})
+
+test('copies the current candidate API key after switching candidates', async ({ page }) => {
+  const firstKey = 'sk-ant-api03-TESTONLY-candidate-first-1111'
+  const secondKey = 'sk-ant-api03-TESTONLY-candidate-second-2222'
+  await installUserscript(
+    page,
+    `https://relay.example.invalid/v1\n${firstKey}\n${secondKey}`,
+  )
+  await selectShare(page)
+
+  const root = page.locator('#ccs-ld-root')
+  await root.locator('#btn').click()
+  const copyKey = root.getByRole('button', { name: '复制 Key', exact: true })
+  await copyKey.click()
+  await expect
+    .poll(() => page.evaluate(() => window.__copiedDeeplinks))
+    .toEqual([firstKey])
+
+  await root.getByRole('button', { name: '下一组候选' }).click()
+  await expect(root.locator('#cand-label')).toHaveText('候选 2/2')
+  await copyKey.click()
+  await expect
+    .poll(() => page.evaluate(() => window.__copiedDeeplinks))
+    .toEqual([firstKey, secondKey])
+
+  await root.getByRole('button', { name: '上一组候选' }).click()
+  await copyKey.click()
+  await expect
+    .poll(() => page.evaluate(() => window.__copiedDeeplinks))
+    .toEqual([firstKey, secondKey, firstKey])
+})
+
+test('disables API key copying when a later selection has no key', async ({ page }) => {
+  await installUserscript(page, 'sk-ant-api03-TESTONLY-previous-key-fixture')
+  await selectShare(page)
+
+  const root = page.locator('#ccs-ld-root')
+  await root.locator('#btn').click()
+  await expect(root.getByRole('button', { name: '复制 Key', exact: true })).toBeEnabled()
+  await root.locator('#cancel').click()
+  await page.locator('#share').click()
+  await expect(root.locator('#btn')).toBeHidden()
+
+  await page.locator('#share').evaluate((element) => {
+    element.textContent = 'OPENAI_BASE_URL=https://relay.example.invalid/v1'
+  })
+  await selectShare(page)
+  await root.locator('#btn').click()
+  await expect(root.getByRole('button', { name: '复制 Key', exact: true })).toBeDisabled()
+  expect(await page.evaluate(() => window.__copiedDeeplinks)).toEqual([])
+})
+
+test('reports API key clipboard failures without claiming success', async ({ page }) => {
+  await installUserscript(page, 'sk-ant-api03-TESTONLY-clipboard-failure-fixture')
+  await page.evaluate(() => {
+    window.GM_setClipboard = () => {
+      throw new Error('Clipboard unavailable in this fixture')
+    }
+  })
+  await selectShare(page)
+
+  const root = page.locator('#ccs-ld-root')
+  await root.locator('#btn').click()
+  await root.getByRole('button', { name: '复制 Key', exact: true }).click()
+  await expect(root.locator('#toast')).toHaveText('Key 复制失败，请重试')
+  expect(await page.evaluate(() => window.__copiedDeeplinks)).toEqual([])
+})
+
 test('runs the critical userscript import flow in Chromium', async ({ page }) => {
   const config = JSON.stringify({
     name: 'Browser fixture',
@@ -79,7 +175,11 @@ test('runs the critical userscript import flow in Chromium', async ({ page }) =>
   await expect(root.locator('#warn')).toContainText('高风险')
   await expect.poll(async () => (await shadowState(page)).activeId).toBe('open')
   await page.keyboard.press('Tab')
+  await expect.poll(async () => (await shadowState(page)).activeId).toBe('copy-key')
+  await page.keyboard.press('Tab')
   await expect.poll(async () => (await shadowState(page)).activeId).toBe('model-select')
+  await page.keyboard.press('Shift+Tab')
+  await expect.poll(async () => (await shadowState(page)).activeId).toBe('copy-key')
   await page.keyboard.press('Shift+Tab')
   await expect.poll(async () => (await shadowState(page)).activeId).toBe('open')
 
