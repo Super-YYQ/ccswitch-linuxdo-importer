@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         CC Switch Importer for linux.do
 // @namespace    https://github.com/Super-YYQ/ccswitch-linuxdo-importer
-// @version      1.2.10
+// @version      1.2.11
 // @description  选中 linux.do 分享文本，一键导入 CC Switch（Claude Code / Codex，自动识别模型）
 // @author       CC Switch Importer Contributors
 // @match        https://linux.do/*
@@ -2001,7 +2001,7 @@ ${config}`;
   }
 
   // userscript/ui-main.js
-  var SCRIPT_VERSION = "1.2.10";
+  var SCRIPT_VERSION = "1.2.11";
   var ROOT_ID = "ccs-ld-root";
   var Z = 2147483e3;
   var lastSelectionText = "";
@@ -2078,6 +2078,15 @@ ${config}`;
     word-break: break-all;
   }
   .ccs-fields .k { color: #868e96; margin-right: 6px; }
+  .ccs-copy-key {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 22px; height: 22px; margin-left: 4px; padding: 4px; vertical-align: middle;
+    border: none; border-radius: 4px; background: transparent; color: #adb5bd;
+    cursor: pointer;
+  }
+  .ccs-copy-key:hover:not(:disabled) { background: #373a40; color: #fff; }
+  .ccs-copy-key:focus-visible { outline: 2px solid #228be6; outline-offset: 2px; }
+  .ccs-copy-key:disabled { opacity: .4; cursor: not-allowed; }
   .ccs-warn {
     font-size: 11px; color: #fcc419; margin: -4px 0 12px; line-height: 1.45;
   }
@@ -2439,7 +2448,12 @@ ${config}`;
     fields.innerHTML = `
     <div><span class="k">name</span>${escapeHtml(result.name || "")}</div>
     <div><span class="k">endpoint</span>${escapeHtml(result.endpoint || "\u2014")}</div>
-    <div><span class="k">apiKey</span>${escapeHtml(maskKey(result.apiKey || "") || "\u2014")}</div>
+    <div><span class="k">apiKey</span>${escapeHtml(maskKey(result.apiKey || "") || "\u2014")}<button type="button" class="ccs-copy-key" id="copy-key" aria-label="\u590D\u5236 Key" title="\u590D\u5236\u5B8C\u6574 Key"${result.apiKey ? "" : " disabled"}>
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+        <rect x="9" y="9" width="13" height="13" rx="2" />
+        <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+      </svg>
+    </button></div>
     <div><span class="k">model</span>${modelLine}</div>
     <div><span class="k">app</span>${escapeHtml(selectedApp || "\u672A\u9009\u62E9")}</div>
     ${providerInfo ? `<div><span class="k">\u9644\u52A0\u53C2\u6570</span>${escapeHtml(
@@ -2454,6 +2468,7 @@ ${config}`;
     )}${configInfo.envFields.length > 12 ? "\u2026" : ""}</div>` : ""}
     <div><span class="k">\u914D\u7F6E\u5927\u5C0F</span>${escapeHtml(formatBytes(configInfo.sizeBytes || 0))}</div>` : ""}
   `;
+    shadow.getElementById("copy-key").addEventListener("click", copyApiKey);
     const configOpt = shadow.getElementById("config-opt");
     const includeCb = shadow.getElementById("include-config");
     const configMeta = shadow.getElementById("config-meta");
@@ -2640,6 +2655,19 @@ ${config}`;
       return Promise.resolve(ok);
     } catch (e) {
       return Promise.resolve(false);
+    }
+  }
+  async function copyApiKey() {
+    const apiKey = currentResult == null ? void 0 : currentResult.apiKey;
+    if (!apiKey) {
+      showToast("\u672A\u8BC6\u522B\u5230\u53EF\u590D\u5236\u7684 Key");
+      return;
+    }
+    try {
+      const ok = await copyText(apiKey);
+      showToast(ok ? "Key \u5DF2\u590D\u5236\u5230\u526A\u8D34\u677F" : "Key \u590D\u5236\u5931\u8D25\uFF0C\u8BF7\u91CD\u8BD5");
+    } catch (e) {
+      showToast("Key \u590D\u5236\u5931\u8D25\uFF0C\u8BF7\u91CD\u8BD5");
     }
   }
   function copyDeeplink(fromBtn) {
