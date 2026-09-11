@@ -1,233 +1,199 @@
 # CC Switch Importer for linux.do
 
-> **本仓库文档与代码由 AI 辅助生成（Claude Code）。**  
-> Generated with AI assistance · 请自行审查后使用
+在 [linux.do](https://linux.do) 选中分享的 API 地址、Key 或配置文本，脚本会在浏览器本地解析内容，并通过 [CC Switch](https://github.com/farion1231/cc-switch) 导入到 **Claude Code** 或 **Codex**。确认卡中的 Key 保持脱敏，也可以点击复制图标获取当前候选的完整 Key。
 
-在 [linux.do](https://linux.do) 上**选中**他人分享的 API 配置文本，点击「导入 ccSwitch」，脚本在本地解析后生成 [`ccswitch://`](https://github.com/farion1231/cc-switch) 深链，唤起本机 [CC Switch](https://github.com/farion1231/cc-switch)，导入到 **Claude Code** 或 **Codex** 供应商。
+**[安装用户脚本](https://raw.githubusercontent.com/Super-YYQ/ccswitch-linuxdo-importer/release/userscript/ccswitch-linuxdo-importer.user.js)** · [最新 Release](https://github.com/Super-YYQ/ccswitch-linuxdo-importer/releases/latest) · [反馈问题](https://github.com/Super-YYQ/ccswitch-linuxdo-importer/issues)
 
----
+## 快速开始
 
-## 功能一览
+### 安装
 
-| 能力 | 说明 |
-|------|------|
-| 触发方式 | 选中文本 → 悬浮按钮 → 确认卡（不监听剪贴板） |
-| 作用站点 | 仅 `linux.do` / `www.linux.do` |
-| 目标应用 | 自动识别 Claude Code / Codex；不明时手选；其他应用深链会明确阻止改写 |
-| 模型识别 | 从文案提取并保留精确 `gpt-*` / `claude-*` / `grok-*` 等 ID；按目标应用排序但不删除中转模型 |
-| 导入方式 | `ccswitch://v1/import?...`；唤起失败时由用户点击「复制深链」手动处理 |
-| 隐私 | 纯本地解析，不上传密钥；确认卡中 Key 脱敏 |
+1. 在 Chrome、Edge 或 Firefox 中安装 [Tampermonkey](https://www.tampermonkey.net/)。
+2. 安装并至少运行一次 [CC Switch](https://github.com/farion1231/cc-switch/releases)，让系统注册 `ccswitch://` 协议。
+3. 打开上方的“安装用户脚本”链接，由 Tampermonkey 接管安装；也可以从 [GitHub Releases](https://github.com/Super-YYQ/ccswitch-linuxdo-importer/releases) 下载 `.user.js` 文件。
+4. 访问 [linux.do](https://linux.do)，选中帖子中的一段配置文本。
 
-### 支持的分享格式
+安装脚本和自动更新地址指向 `release` 分支；`main` 分支只保存源码、测试和文档。若曾从旧的 `main` 地址安装，请卸载旧脚本，再通过上面的安装链接重新安装。
 
-1. **官方深链** — `ccswitch://v1/import?...`（Claude Code / Codex；安全元数据会保留，风险或未知参数需显式勾选）
-2. **Base64** — 整段配置或单独的 Key（自动解码 `sk-` / `sk-ant-` / `g2a_` / `tp-` / `ark-` / `xai-` / `gsk_` / `pplx-` / `r8_` / `hf_` / `fw_` 等前缀；无固定前缀的厂商 token 在「base64/64解密」提示 + endpoint 共同出现时也可识别）
-3. **JSON** — `baseUrl` / `endpoint` + `apiKey` 等
-4. **环境变量** — `ANTHROPIC_BASE_URL`、`ANTHROPIC_AUTH_TOKEN`、`OPENAI_*` 等
-5. **TOML / key=value** — `base_url = "..."`、`api_key = "..."`
-6. **混排文本** — 中文说明 + URL + Key（含全角冒号 `url：` / `key：`、表格 `Base URL    https://...`、标签与 Base64 分行）
-7. **火山引擎方舟（Volcengine Ark）** — `ark.cn-beijing.volces.com` 双协议（Anthropic `/api/coding` + OpenAI `/api/coding/v3`）；Key 以 Base64 分享，解码为 `ark-<uuid>-<suffix>`，自动识别并按 endpoint 路径判定 Claude / Codex
+### 使用
 
----
+1. 选中含 API 地址、Key 或配置块的文本。
+2. 点击蓝色悬浮按钮 **“导入 ccSwitch”**。
+3. 在确认卡中核对 endpoint、脱敏 Key、模型和目标应用。存在多组 URL/Key 时，使用 **‹ / ›** 切换候选。
+4. 按需调整模型，以及是否携带完整配置或风险附加参数。
+5. 选择操作：
 
-## 安装
+| 操作 | 效果 |
+| --- | --- |
+| Key 旁的复制图标 | 复制当前候选的完整 Key，界面仍保持脱敏；支持鼠标和键盘操作 |
+| 复制深链 | 复制当前导入链接，供手动使用 |
+| 打开导入 | 尝试唤起 CC Switch，不会自动写入剪贴板 |
+| 取消或 `Escape` | 关闭确认卡 |
 
-1. 安装 [Tampermonkey](https://www.tampermonkey.net/)（Chrome / Edge / Firefox）
-2. 安装并至少运行过一次 [CC Switch](https://github.com/farion1231/cc-switch/releases)（注册 `ccswitch://`）
-3. 安装用户脚本（任选其一）：
-   - **推荐**：打开  
-     [raw 脚本（一键安装）](https://raw.githubusercontent.com/Super-YYQ/ccswitch-linuxdo-importer/release/userscript/ccswitch-linuxdo-importer.user.js)  
-     由 Tampermonkey 捕获并安装  
-     （安装地址固定指向 **`release` 分支**；`main` 只放源码，推送 main **不会**自动给用户发版）
-   - 或从 [GitHub Releases](https://github.com/Super-YYQ/ccswitch-linuxdo-importer/releases) 下载对应版本的 `.user.js`
-4. 访问 https://linux.do ，在帖子中选中一段配置文字
+未识别到 Key 时，复制图标不可用。复制成功或失败都会显示提示。
 
-确认安装版本：打开确认卡后，元信息末尾应显示当前发布版本（例如 **v1.2.10**）。
+## 支持范围
 
-> 若你之前从 `main` 安装过旧版：请卸载后按上面的 `release` 链接重装一次，否则自动更新仍会指向已废弃的 main 产物路径。
+脚本只在 `linux.do` 和 `www.linux.do` 生效，导入目标为 **Claude Code** 和 **Codex**。无法确定目标时可以手动选择；已有深链若明确指定其他应用，脚本会阻止将其改写为 Claude Code 或 Codex。
 
----
+### 分享格式
 
-## 使用
+| 格式 | 示例或处理方式 |
+| --- | --- |
+| CC Switch 深链 | `ccswitch://v1/import?...`，仅处理 provider 导入 |
+| JSON | `baseUrl` / `endpoint` 配合 `apiKey`，或包含 `env` 的完整配置 |
+| 环境变量 | `ANTHROPIC_BASE_URL`、`ANTHROPIC_AUTH_TOKEN`、`OPENAI_*` 等 |
+| TOML / 键值文本 | `base_url = "..."`、`api_key = "..."` |
+| Base64 | 编码后的配置、Key 或 Key 字段片段；支持部分多层编码形式 |
+| 混排与表格 | 中文说明、URL、Key 混排，以及 `url：` / `key：`、标签和值分行等形式 |
 
-1. 选中含 API 地址 / Key / 配置块的文本（可含中文说明）
-2. 点击蓝色悬浮按钮 **「导入 ccSwitch」**
-3. 在确认卡检查：
-   - `endpoint` / 脱敏 `apiKey`；点击旁边的**复制图标**可复制当前候选的完整 Key（悬停提示「复制完整 Key」）
-   - `model`（多模型时可下拉切换；按 Claude/Codex 优先排序，其他中转模型仍保留）
-   - 多组 URL/Key 时可用 ‹ › 切换候选
-   - 完整配置及风险/未知深链参数的字段名与默认携带状态
-   - Claude Code / Codex 目标栏
-4. 点 **「打开导入」** 唤起 CC Switch  
-   若无反应：点 **「复制深链」** 粘贴到地址栏，或检查 CC Switch 是否已注册协议  
-   （打开时**不会**自动把含 Key 的深链写入剪贴板）
-5. 也可点 **「复制深链」** 手动处理
+可识别 `sk-`、`sk-ant-`、`g2a_`、`tp-`、`ark-`、`xai-`、`gsk_`、`pplx-`、`r8_`、`hf_`、`fw_` 等常见 Key 前缀。无固定前缀的 Base64 token 需要同时满足地址、解码提示和 Key 形态等条件，以减少误判。
 
-### 模型自动配置规则
+火山引擎方舟的 Anthropic `/api/coding` 与 OpenAI `/api/coding/v3` 地址也有对应识别逻辑。分享内容中的零宽字符、部分中文水印、折行和链接化文本会在解析时处理。
 
-| 情况 | 行为 |
-|------|------|
-| 文案中只出现 **1 个** 可识别模型 | 自动作为默认 `model` 写入深链 |
-| 出现 **多个** 模型 | Claude 优先 Sonnet/Claude 系列，Codex 优先 GPT/o 系列；手工选择只要仍有效就保留，其他中转模型不删除 |
-| Claude 快照 / 别名 | 保留原始精确 ID，例如 `claude-sonnet-4-5-20250929` 不会缩成 `claude-sonnet-4-5` |
-| 只有「支持所有模型」等描述、无具体 ID | 不写入模型参数 |
-| 深链参数 | 使用官方协议：`model`、`haikuModel`、`sonnetModel`、`opusModel`（见 [CC Switch 深链文档](https://github.com/farion1231/cc-switch/blob/main/docs/user-manual/en/5-faq/5.3-deeplink.md)） |
+### 模型选择
 
----
+| 文本内容 | 行为 |
+| --- | --- |
+| 仅识别到一个模型 | 自动填入 `model` |
+| 识别到多个模型 | Claude Code 优先 Claude / Sonnet，Codex 优先 GPT / o 系列；其他模型仍可选 |
+| 切换目标应用 | 重新计算默认模型；仍然有效的手动选择会保留 |
+| 只有“支持所有模型”等描述 | 不自动填入模型 |
+
+已识别的 Claude 快照 ID 会保留日期和版本信息，例如 `claude-sonnet-4-5-20250929`。模型来自选中文本，脚本不会访问供应商接口查询模型列表。
 
 ## 解析示例
 
-**环境变量 + 中文噪声**
+以下示例全部使用合成数据，不包含可用密钥。
+
+### 环境变量
 
 ```text
-分享一个可用的：
-ANTHROPIC_BASE_URL=https://proxy.example.com/v1
-ANTHROPIC_AUTH_TOKEN=sk-ant-api03-xxxx
-别外传。
+ANTHROPIC_BASE_URL=https://relay.example.invalid/v1
+ANTHROPIC_AUTH_TOKEN=sk-ant-api03-TESTONLY-readme-fixture
 ```
 
-**表格 + Base64 Key（常见于 linux.do）**
-
-```text
-Base URL    https://example.com
-API Key（Base64，请自行解码）
-c2st...==
-模型设置    gpt-5.5，claude-3.5-sonnet
-```
-
-**全角标签**
-
-```text
-url：https://grok.example.net
-key：ZzJhX...==
-```
-
-**JSON**
+### JSON
 
 ```json
-{"name":"MyRelay","baseUrl":"https://relay.example.com","apiKey":"sk-ant-api03-xxxx"}
+{
+  "name": "Example Relay",
+  "baseUrl": "https://relay.example.invalid/v1",
+  "apiKey": "sk-ant-api03-TESTONLY-readme-fixture"
+}
 ```
 
----
+### 全角标签与 Base64 Key
 
-## 开发
+```text
+url：https://relay.example.invalid/v1
+key（Base64）：c2stYW50LWFwaTAzLVRFU1RPTkxZLXJlYWRtZS1maXh0dXJl
+```
+
+### 表格与分行 Key
+
+```text
+Base URL    https://relay.example.invalid/v1
+API Key（Base64，请自行解码）
+c2stYW50LWFwaTAzLVRFU1RPTkxZLXJlYWRtZS1maXh0dXJl
+模型设置    gpt-5.5，claude-sonnet-4-6
+```
+
+## 隐私与安全
+
+- **本地解析**：不上传或在线验证 Key，也不监听剪贴板内容。
+- **脱敏显示**：确认卡隐藏 Key 中间部分；只有主动点击复制图标或“复制深链”时，才会写入剪贴板。
+- **配置检查**：递归检查完整配置中的字段和环境变量。进程控制、命令、脚本、远程配置及未知字段默认不携带；风险或未知深链参数需要显式勾选。
+- **地址校验**：endpoint 只允许 HTTP(S)。本机 HTTP 可用；非本机 HTTP 会提示未加密风险；包含账号密码或使用其他协议的地址会被阻止。
+- **长度限制**：选区超过 64 KiB 时只解析开头和结尾，并提示中间内容已省略。最终深链最多 8,000 个字符，超限时不能复制或打开。
+- **保密建议**：导入前核对地址和配置来源；截图、Issue 和提交记录中不要包含真实 Key。
+
+## 常见问题
+
+### 选中文字后没有出现按钮
+
+确认脚本已启用，并且当前页面属于支持站点。尽量完整选中地址、Key 或配置块，不要只选说明文字。
+
+### Key 显示为 `****`，怎样复制原值？
+
+点击 Key 旁的复制图标。此功能从 v1.2.11 起提供，旧版本需要先更新。
+
+### 点击“打开导入”没有反应
+
+确认已安装并运行过 CC Switch，且系统已经注册 `ccswitch://` 协议。也可以点击“复制深链”，再将链接粘贴到地址栏尝试打开。
+
+### 仓库有新提交，用户脚本却没有更新
+
+源码推送和正式发布是两件事。只有创建并推送与包版本一致的 `v*` 标签、Release 工作流成功后，`release` 分支中的安装脚本才会更新。
+
+### 提示深链过长
+
+取消携带完整配置或风险附加参数，或者缩小选区、缩短输入字段后重试。
+
+### 模型没有识别出来
+
+确认选中文本包含具体且已支持的模型 ID。有多个候选模型时，可以在确认卡的下拉框中手动选择。
+
+## 本地开发
+
+项目要求 **Node.js 18 或更高版本**。
 
 ```bash
-# 安装依赖（esbuild 等）
 npm ci
-
-# 单元测试
-npm test
-
-# Chromium 浏览器测试（首次需 `npx playwright install chromium`）
-npm run test:browser
-
-# 用 esbuild 将 ESM 源码打包为油猴 IIFE 单文件（本地产物，不提交到 main）
-npm run build
-
-# 测试 + 构建
+npx playwright install chromium
 npm run check
 ```
 
-| 路径 | 说明 |
-|------|------|
-| `userscript/lib/core.mjs` | 配置解析 / 分类 / 深链（Node 测试直接 import） |
-| `userscript/lib/model-extractor.mjs` | 模型名提取 |
-| `userscript/ui-main.js` | 选区 / 确认卡 / 唤起（esbuild 入口，ESM） |
-| `userscript/ccswitch-linuxdo-importer.user.js` | **构建产物**（gitignore；仅 `release` 分支 / Release 资产） |
-| `scripts/build.mjs` | esbuild IIFE + userscript 头（`@updateURL` → `release`） |
-| `tests/*.test.mjs` | 解析、模型与发布守卫单测 |
-| `tests/browser/` | Chromium 中的 Selection / Shadow DOM / 导入交互回归测试 |
-| `docs/superpowers/` | 设计与计划 |
+| 命令 | 用途 |
+| --- | --- |
+| `npm test` | 运行解析器、模型提取、发布守卫单元测试及格式变体验证 |
+| `npm run test:browser` | 先构建，再运行 Chromium 交互测试 |
+| `npm run build` | 将源码打包为单文件油猴脚本 |
+| `npm run check` | 运行完整的单元与浏览器检查 |
 
-本地验证：`npm run build` 后把生成的 `.user.js` 粘进 Tampermonkey，或用「从磁盘安装」。
+本地构建产物为 `userscript/ccswitch-linuxdo-importer.user.js`，已被 Git 忽略。修改源码后需重新构建，再安装到 Tampermonkey 验证。
 
-### 发布流程
+### 目录结构
 
-分支职责：
+| 路径 | 职责 |
+| --- | --- |
+| [`userscript/ui-main.js`](userscript/ui-main.js) | 选区识别、确认卡、复制和导入交互 |
+| [`userscript/lib/core.mjs`](userscript/lib/core.mjs) | 配置解析、归一化、风险检查和深链构建 |
+| [`userscript/lib/model-extractor.mjs`](userscript/lib/model-extractor.mjs) | 模型提取和默认选择 |
+| [`scripts/build.mjs`](scripts/build.mjs) | 打包脚本、注入版本及安装更新地址 |
+| [`scripts/release-guard.mjs`](scripts/release-guard.mjs) | 版本比较和发布产物哈希检查 |
+| [`tests/`](tests/) | 单元、格式变体和浏览器回归测试 |
+| [`.github/workflows/`](.github/workflows/) | CI 与标签触发的发布工作流 |
+| [`docs/superpowers/`](docs/superpowers/) | 项目设计与实施记录 |
+
+## 发布说明
 
 | 分支 | 内容 |
-|------|------|
-| `main` | 源码、测试、构建脚本；**不含**安装用 `.user.js` |
-| `release` | 稳定油猴脚本（Tampermonkey `@updateURL` / `@downloadURL` 目标） |
+| --- | --- |
+| `main` | 源码、测试和文档；普通推送只触发 CI |
+| `release` | 正式安装脚本，由发布工作流维护，也是 Tampermonkey 的更新来源 |
 
-发版步骤：
+只更新源码或文档时，提交并推送 `main` 即可，不需要发布标签。正式发版流程如下：
 
-1. 在 `main` 改完功能，`npm run check` 通过
-2. 把 `package.json` 版本号改成要发布的版本（如 `1.2.0`）
-3. 合并到 `main` 后打 tag 并推送 tag（**不要**只靠推 main 发版）：
+1. 同步更新 `package.json` 和 `package-lock.json` 中的版本号。
+2. 运行 `npm run check`，将通过验证的改动提交并推送到 `main`。
+3. 为该提交创建 `v<版本号>` 标签并推送；标签必须与包版本一致。
+4. 等待 [Release 工作流](.github/workflows/release.yml) 完成，核对 GitHub Release 附件和 `release` 分支脚本。
 
-```bash
-git tag v1.2.0
-git push origin v1.2.0
-```
+发布流程先以只读权限测试和构建，再通过版本及 SHA-256 守卫发布。它会阻止版本降级，以及用不同内容覆盖同一版本。
 
-4. GitHub Action `Release`（`.github/workflows/release.yml`）会：
-   - **build Job（contents:read）**：`npm ci` → 单测 + Chromium 浏览器测试 → 构建 userscript → 把 `release-guard`（含 semver）esbuild 打成单文件并上传 artifact
-   - 校验 tag 与 `package.json` 版本一致（`v1.2.3` ↔ `1.2.3`），且 tag 提交在 `main` 上
-   - **publish Job（contents:write）**：**不**再 `npm ci`；用 artifact 里的 `dist/release-guard.mjs` 做 semver + SHA-256 守卫；checkout 无持久凭据，仅最终 `git push` 注入 token
-   - 把产物推到 `release` 分支并创建 GitHub Release
+## 版本记录
 
-CI（`main` / PR）执行 Node 18/20/22 单测、构建及独立 Chromium 浏览器测试，**不会**更新 `release` 分支。
+- **v1.2.11** — 确认卡新增紧凑复制图标，可在 Key 脱敏状态下复制当前候选的完整值；支持悬停提示与键盘操作，并补充复制相关浏览器回归验证。
+- **v1.2.10** — 加强超长选区、配置风险、endpoint、深链长度、模型选择、键盘操作和发布安全，并加入 Chromium 回归门禁。
+- **v1.2.9** — 修复 Base64 解码结果为 Key 字段片段时无法提取真实值的问题。
+- **v1.2.8** — 修复 Base64 Key 与独立 `base_url` 跨解析器合并后丢失 endpoint 的问题。
+- **v1.2.7** — 扩展无固定前缀 Key、多个厂商前缀及 linux.do 常见文本格式支持。
 
----
+更早版本及完整变更说明见 [GitHub Releases](https://github.com/Super-YYQ/ccswitch-linuxdo-importer/releases)。
 
-## 安全说明
+## 许可证
 
-- 仅在用户**主动选中并点击**后处理文本
-- Key 在确认卡中脱敏（如 `sk-ant-****xxxx`）；点击 Key 旁的复制图标才会将完整 Key 写入剪贴板
-- 最多处理 64 KiB；超长选区按头尾采样并提示，中间配置会要求缩小选区重试
-- 完整 JSON 配置会递归检查字段；进程控制环境变量、脚本/命令、远程配置及未知字段默认不携带
-- 官方深链的普通元数据默认保留；风险或未知附加参数需用户显式勾选
-- endpoint 只允许 HTTP(S)：本机 HTTP 可用，非本机 HTTP 会警告，内嵌账号密码或其他协议会阻止
-- 所有最终深链统一限制为 8,000 字符；超限时不会打开或复制，也不会静默删减字段
-- 「打开导入」不会自动复制含 Key 的深链；复制始终需要用户主动点击
-- 勿在公共场合长期展示含真实 Key 的截图
-- 本仓库示例中的密钥均为格式样例；真实额度请勿提交到公开仓库
+[MIT License](LICENSE) · © 2026 CC Switch Importer Contributors
 
----
-
-## 变更摘要
-
-- **v1.2.11** — 确认卡新增紧凑复制图标，可在 Key 保持脱敏时复制当前候选的完整值；支持悬停提示与键盘操作；补齐候选切换、缺少 Key 和复制失败的浏览器回归验证
-- **v1.2.10** — 兼容与安全加固：JSON 扫描改为有界线性处理；超长选区头尾采样；递归配置/env 风险策略；官方 provider 深链安全参数无损保留、风险/未知参数显式选择、阻止不支持应用改写；endpoint 与 8,000 字符统一终检；精确保留 Claude 快照及新增系列；模型默认随目标应用切换且保留手选；确认卡补齐焦点/读屏语义；新增 Chromium 回归门禁
-- **v1.2.9** — Key 以 base64 分享且解码为 `"OPENAI_API_KEY": "sk-…"` 这类**字段片段**时，从包裹文本中抽出真实 key 值；支持 `key ：` 全角标签 + 独立 `base_url` 行、ascii/大写/`api_key`/中文备注标签等变体；随机 base64 噪声不误判
-- **v1.2.8** — 修复跨解析器拼接丢字段：base64 只含 `OPENAI_API_KEY` 字段、endpoint 在另一行（如 `base_url = “…”`）时，合并结果被旧候选覆盖导致 endpoint 丢失；现在候选对与顶层字段保持同步
-- **v1.2.7** — 通用化 Key 识别，大幅降低对固定前缀的依赖：
-  - **补厂商前缀**（已对照 gitleaks / n8n / pipelock 核实）：`ark-`(火山引擎方舟，双协议按 endpoint 路径判定 Claude `/coding` / Codex `/coding/v3`)、`xai-`(xAI)、`gsk_`(Groq)、`pplx-`(Perplexity)、`r8_`(Replicate)、`hf_`(HuggingFace)、`fw_`(Fireworks)
-  - **修 C 格式 gap**：标签行带描述词(如 `API-Key Base64`)+ 换行 token 的两行格式也能识别
-  - **无前缀厂商 key**：阶跃 / Mistral / Cohere 等无固定前缀 token，当文案含 endpoint URL 且有「base64/64解密/解码」提示时，经「endpoint+提示+key 形态」三重门控识别
-  - **修按钮误报**：聊天里「token」日常用词 + emoji 短码(如 `:backhand_index_pointing_left:`)不再点亮按钮，labeled 分支裸 token 兜底改用 `lookLikeKeyValue` 精判
-  - **修 lastIndex bug**:`VENDOR_KEY_RE` 全局正则命中提前 return 时未重置 `lastIndex`，导致连续选中不同文本时按钮时亮时不亮
-- **v1.2.6** — 标签 Key 不再接受中文占位/URL；裸域名不再从邮箱剥出；Claude 4 完整模型 ID；provider 深链走 finalize 清洗；弱 Key 降置信度
-- **v1.2.5** — 明文 `sk-` Key 中间插入 CJK 水印时完整匹配并剥离
-- **v1.2.4** — 识别 `g2a_`/`tp-` 等 vendor key 亮按钮；Discourse onebox 裸域名（无 `https://`）自动补全为 endpoint
-- **v1.2.3** — publish Job 不再 `npm ci`：只读 build 打包 `release-guard`；写权限 Job 零依赖安装；git 凭据仅最终 push 注入
-- **v1.2.2** — 发布守卫：同版本比 SHA-256（内容不同拒绝）；版本比较改用 `semver`（支持预发布号）
-- **v1.2.1** — bug333 审查：Release 拆 build/publish 最小权限；并发与版本降级保护；深链长度上限；多深链/无 `//` 提取；错误卡清理；高风险配置默认不勾选；env 字段摘要；TextEncoder 字节数
-- **v1.2.0** — 发布链路加固：esbuild IIFE 替代正则剥 export；`@updateURL`/`@downloadURL` 指向 `release` 分支；main 仅源码；打 `v*` tag 才发布
-- **v1.1.7** — 确定性测试密钥；确认卡披露完整 config + 可取消携带；非 provider 深链不亮按钮；URL/Key 按行邻近配对；CI Node 18/20/22
-- **v1.1.6** — 模型最长匹配去重；`filterModelsForApp` 改为排序不删；清理残留测试密钥；历史 `filter-repo` 脱敏
-- **v1.1.5** — 审查加固：拒绝非 provider 深链；简单 JSON 不再整包 config；解析大小/候选预算；测试夹具改为合成密钥且日志脱敏
-- **v1.1.4** — 识别 `tp-`（token-plan 等）Key 前缀；中文粘连 Base64（`…佬友们用dHAt…`）也能抽出 Key
-- **v1.1.3** — 支持「俩次 base64」嵌套解码（多层 peel 到 `sk-` / `g2a_`）；识别 `base64：` / `俩次base64：` 标签
-- **v1.1.2** — 精简 A：统一 `normalizeApiKey` 出口；合并 labeled/table 扫描（标签表单源）；前缀提示改为内部函数（行为不变）
-- **v1.1.1** — Base64/Hex Key 解码后根据文案「别忘了 sk- 前缀」等提示自动补 `sk-` / `sk-ant-` / `g2a_`；确认卡提示已补前缀
-- **v1.1.0** — 稳定 app 分类（模型列表不再误判）；多 URL/Key 候选可切换；确认卡模型下拉并按 app 过滤；打开导入不再自动复制含 Key 深链；CI + `npm run check`
-- **v1.0.8** — Discourse 折行/链化 newapi JSON 时合并多解析器结果恢复 Key；endpoint 去尾部引号；屏蔽 base64 内假 `o3` 模型
-- **v1.0.7** — 修复 Discourse 把 JSON `"url"` 链化后 enrich 改坏对象导致丢字段；支持 `newapi_channel_conn` 等 `{key,url}` JSON 分享
-- **v1.0.6** — Windows 友好测试脚本；confidence 封顶；收紧 base64 误报；构建注入版本与 `@updateURL`；Grok 匹配加词边界
-- **v1.0.5** — 识别无连字符的 `Grok4.5` / `grok4.5` 等 informal 模型写法
-- **v1.0.4** — Base64 Key 解码后自动剥离 linux.do「去除文中」等 CJK 水印
-- **v1.0.3** — 选区中的链接若可见文案是 `base url` / `url`（真实地址只在 `href`），自动合并 `href` 后再解析
-- **v1.0.2** — 模型自动识别并写入深链；README 重排；作者信息匿名化
-- **v1.0.1** — Discourse 表格 / Base64 分行 / 零宽字符等抗噪声
-- **v1.0.0** — 首版油猴导入
-
----
-
-## License
-
-MIT · © 2026 CC Switch Importer Contributors
-
-> 本 README 与项目主体由 AI 辅助编写，贡献者可自行 fork / 修改。
+本项目代码与文档由 AI 辅助编写，请审查后使用。
