@@ -10,7 +10,7 @@
     "test:browser": "npm run build && playwright test",
     "build": "node scripts/build.mjs",
     "check": "npm run test:unit && npm run test:browser",
-    "build:guard": "node ./node_modules/esbuild/bin/esbuild scripts/release-guard.mjs --bundle --platform=node --format=esm --outfile=dist/release-guard.mjs"
+    "build:guard": "esbuild scripts/release-guard.mjs --bundle --platform=node --format=esm --outfile=dist/release-guard.mjs"
   },
   "engines": {
     "node": ">=18"
