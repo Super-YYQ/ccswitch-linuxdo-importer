@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         CC Switch Importer for linux.do
 // @namespace    https://github.com/Super-YYQ/ccswitch-linuxdo-importer
-// @version      1.2.11
+// @version      1.2.12
 // @description  选中 linux.do 分享文本，一键导入 CC Switch（Claude Code / Codex，自动识别模型）
 // @author       CC Switch Importer Contributors
 // @match        https://linux.do/*
@@ -74,7 +74,7 @@
     "PROMPT_COMMAND",
     "GIT_SSH_COMMAND"
   ]);
-  var URL_RE = /https?:\/\/[^\s"'`<>，。；、）)\]}]+/gi;
+  var URL_RE = /https?:\/\/(?:\([^\s"'`<>，。；、）)\]}]*\)|[^\s"'`<>，。；、）)\]}])+/gi;
   var BARE_HOST_RE = /(?<![@.\w-])(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:com|net|org|io|dev|app|ai|cc|me|co|info|xyz|top|tech|cloud|run|site|online|pro|page|link|live|tv|us|uk|cn|jp|de|fr|ru|br|in|au|ca|nl|se|no|fi|pl|cz|ch|at|be|es|it|pt|kr|tw|hk|sg|my|id|ph|vn|th|edu|gov)(?:\/[^\s"'`<>，。；、）)\]}]*)?/gi;
   var SK_KEY_BODY = "(?:[A-Za-z0-9_\\-]|[^\\x00-\\x7F]{1,12}(?=[A-Za-z0-9_\\-]))";
   var SK_ANT_RE = new RegExp(`sk-ant-${SK_KEY_BODY}{10,}`, "g");
@@ -150,7 +150,7 @@
     return result;
   }
   function mergeParseResults(candidates) {
-    var _a, _b, _c, _d, _e;
+    var _a, _b, _c;
     const list = candidates.filter(Boolean);
     if (list.length === 0) return null;
     const complete = list.filter((r) => r.endpoint && r.apiKey).sort((a, b) => (b.confidence || 0) - (a.confidence || 0));
@@ -170,7 +170,6 @@
       if ((r.confidence || 0) > (best.confidence || 0)) {
         best.source = r.source;
         best.confidence = r.confidence;
-        best.warnings = r.warnings || best.warnings;
         best.candidateCount = Math.max(best.candidateCount || 1, r.candidateCount || 1);
         best.app = r.app != null ? r.app : best.app;
       }
@@ -179,15 +178,21 @@
     if ((_c = best.candidates) == null ? void 0 : _c.length) {
       const idx = Math.max(0, Math.min(best.candidateIndex || 0, best.candidates.length - 1));
       best.candidateIndex = idx;
-      const current = best.candidates[idx];
-      if (current) {
-        best.candidates[idx] = {
-          endpoint: (_d = current.endpoint) != null ? _d : best.endpoint,
-          apiKey: (_e = current.apiKey) != null ? _e : best.apiKey
+      best.candidates = best.candidates.map((c) => {
+        var _a2, _b2;
+        return {
+          endpoint: (_a2 = c.endpoint) != null ? _a2 : best.endpoint,
+          apiKey: (_b2 = c.apiKey) != null ? _b2 : best.apiKey
         };
+      });
+    }
+    const carried = [];
+    for (const r of list) {
+      for (const w of r.warnings || []) {
+        if (!isFieldDerivedWarning(w)) carried.push(w);
       }
     }
-    best.warnings = buildWarnings(best);
+    best.warnings = Array.from(/* @__PURE__ */ new Set([...carried, ...buildWarnings(best)]));
     best.confidence = scoreFields(best, best.app);
     return best.endpoint || best.apiKey ? best : null;
   }
@@ -198,9 +203,6 @@
     const base = text == null ? "" : String(text);
     if (!anchors || anchors.length === 0) return base;
     const existing = new Set(matchAll(base, URL_RE).map(cleanUrl));
-    for (const u of existing) {
-      if (base.includes(u)) existing.add(u);
-    }
     const toAdd = [];
     for (const a of anchors) {
       if (!a) continue;
@@ -308,7 +310,11 @@ ${appended.join("\n")}`;
   }
   function normalizeApiKey(raw, shareText = "") {
     if (raw == null || raw === "") return raw;
-    const decoded = decodeKeyBody(raw);
+    let decoded = decodeKeyBody(raw);
+    if (decoded && !hasKeyPrefix(decoded) && !lookLikeKeyValue(decoded)) {
+      const unwrapped = extractKeyFromWrapper(decoded);
+      if (unwrapped) decoded = unwrapped;
+    }
     return applyKeyPrefixHints(decoded, shareText);
   }
   function finalizeResult(result, text = "") {
@@ -417,8 +423,16 @@ ${appended.join("\n")}`;
     }
     return false;
   }
+  function isForumEndpoint(u) {
+    try {
+      const host = new URL(String(u || "")).hostname.toLowerCase();
+      return host === "linux.do" || host.endsWith(".linux.do");
+    } catch (e) {
+      return false;
+    }
+  }
   function collectEndpoints(text) {
-    const full = matchAll(text, URL_RE).map(cleanUrl).filter((u) => isHttpUrl(u));
+    const full = matchAll(text, URL_RE).map(cleanUrl).filter((u) => isHttpUrl(u) && !isForumEndpoint(u));
     const bare = matchAll(text, BARE_HOST_RE).map((h) => normalizeBareHost(h)).filter(Boolean);
     const covered = /* @__PURE__ */ new Set();
     for (const u of full) {
@@ -433,6 +447,7 @@ ${appended.join("\n")}`;
       const hostOnly = h.replace(/^https?:\/\//i, "").split("/")[0].toLowerCase();
       if (covered.has(h.toLowerCase()) || covered.has(hostOnly)) continue;
       if (full.some((u) => u.toLowerCase().includes(hostOnly))) continue;
+      if (isForumEndpoint(h)) continue;
       bareUrls.push(h);
       covered.add(hostOnly);
     }
@@ -498,7 +513,7 @@ ${appended.join("\n")}`;
         }
       }
     }
-    const includeConfig = options && Object.prototype.hasOwnProperty.call(options, "includeConfig") ? options.includeConfig !== false : shouldIncludeFullConfigByDefault(result.config);
+    const includeConfig = options && Object.prototype.hasOwnProperty.call(options, "includeConfig") ? options.includeConfig !== false : shouldIncludeFullConfigByDefault(result.config, result.configFormat);
     if (includeConfig && result.config) {
       params.set("config", base64Encode(result.config));
       params.set("configFormat", result.configFormat || "json");
@@ -542,26 +557,32 @@ ${appended.join("\n")}`;
       riskReasons
     };
   }
-  function describeConfigPayload(config) {
+  function describeConfigPayload(config, format) {
     if (!config) return null;
     const raw = String(config);
     const sizeBytes = typeof TextEncoder !== "undefined" ? new TextEncoder().encode(raw).byteLength : typeof Buffer !== "undefined" ? Buffer.byteLength(raw, "utf8") : raw.length;
     let fields = [];
     let envFields = [];
     const riskReasons = [];
-    try {
-      const obj = JSON.parse(raw);
-      if (obj && typeof obj === "object" && !Array.isArray(obj)) {
-        fields = Object.keys(obj);
-        const inspection = inspectConfigObject(obj);
-        envFields = inspection.envFields;
-        riskReasons.push(...inspection.riskReasons);
-      } else {
-        riskReasons.push("\u914D\u7F6E\u6839\u8282\u70B9\u4E0D\u662F\u666E\u901A JSON \u5BF9\u8C61");
+    if (String(format || "json").toLowerCase() === "toml") {
+      const inspection = inspectTomlConfig(raw);
+      fields = inspection.fields;
+      riskReasons.push(...inspection.riskReasons);
+    } else {
+      try {
+        const obj = JSON.parse(raw);
+        if (obj && typeof obj === "object" && !Array.isArray(obj)) {
+          fields = Object.keys(obj);
+          const inspection = inspectConfigObject(obj);
+          envFields = inspection.envFields;
+          riskReasons.push(...inspection.riskReasons);
+        } else {
+          riskReasons.push("\u914D\u7F6E\u6839\u8282\u70B9\u4E0D\u662F\u666E\u901A JSON \u5BF9\u8C61");
+        }
+      } catch (e) {
+        fields = [];
+        riskReasons.push("\u914D\u7F6E\u4E0D\u662F\u53EF\u89E3\u6790\u7684 JSON");
       }
-    } catch (e) {
-      fields = [];
-      riskReasons.push("\u914D\u7F6E\u4E0D\u662F\u53EF\u89E3\u6790\u7684 JSON");
     }
     return {
       fields,
@@ -570,6 +591,28 @@ ${appended.join("\n")}`;
       risky: riskReasons.length > 0,
       riskReasons
     };
+  }
+  function inspectTomlConfig(raw) {
+    const fields = /* @__PURE__ */ new Set();
+    for (const line of String(raw).split(/\r?\n/)) {
+      const t = line.trim();
+      if (!t || t.startsWith("#")) continue;
+      const section = t.match(/^\[\[?\s*([\w."'-]+)\s*\]?\]$/);
+      if (section) {
+        fields.add(section[1]);
+        continue;
+      }
+      const kv = t.match(/^([A-Za-z_][\w.-]*)\s*=/);
+      if (kv) fields.add(kv[1]);
+    }
+    const list = Array.from(fields);
+    const riskReasons = [];
+    const risky = list.filter((f) => isRiskyConfigFieldName(f) || isRiskyEnvName(f));
+    if (risky.length) {
+      riskReasons.push(`\u9AD8\u98CE\u9669\u5B57\u6BB5\uFF1A${risky.slice(0, 8).join("\u3001")}`);
+    }
+    if (list.length === 0) riskReasons.push("\u914D\u7F6E\u4E0D\u662F\u53EF\u89E3\u6790\u7684 TOML");
+    return { fields: list, riskReasons };
   }
   var KNOWN_CONFIG_FIELDS = /* @__PURE__ */ new Set([
     "env",
@@ -703,9 +746,9 @@ ${appended.join("\n")}`;
     if (fieldCountExceeded) riskReasons.push(`\u914D\u7F6E\u5B57\u6BB5\u8D85\u8FC7\u5B89\u5168\u4E0A\u9650 ${MAX_CONFIG_FIELDS}`);
     return { envFields: Array.from(envFields), riskReasons };
   }
-  function shouldIncludeFullConfigByDefault(config) {
+  function shouldIncludeFullConfigByDefault(config, format) {
     if (!config) return false;
-    const info = describeConfigPayload(config);
+    const info = describeConfigPayload(config, format);
     if (!info) return false;
     return !info.risky;
   }
@@ -762,7 +805,8 @@ ${config}`;
       candidateIndex: i,
       candidateCount: list.length
     };
-    next.warnings = buildWarnings(next);
+    const carried = (result.warnings || []).filter((w) => !isFieldDerivedWarning(w));
+    next.warnings = Array.from(/* @__PURE__ */ new Set([...carried, ...buildWarnings(next)]));
     next.confidence = scoreFields(next, next.app);
     if (typeof next.confidence === "number") {
       next.confidence = Math.min(1, Math.max(0, next.confidence));
@@ -1290,10 +1334,11 @@ ${config}`;
       const m = trimmed.match(/^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/);
       if (!m) continue;
       let val = m[2].trim();
-      if (val.startsWith('"') && val.endsWith('"') || val.startsWith("'") && val.endsWith("'")) {
+      if (val.length >= 2 && (val.startsWith('"') && val.endsWith('"') || val.startsWith("'") && val.endsWith("'"))) {
         val = val.slice(1, -1);
+      } else {
+        val = val.replace(/\s+#.*$/, "").trim();
       }
-      val = val.replace(/\s+#.*$/, "").trim();
       if (val) map[m[1]] = val;
     }
     if (Object.keys(map).length === 0) {
@@ -1633,7 +1678,7 @@ ${config}`;
     const t = String(text || "").trim();
     if (!t || t.length > 1024) return null;
     const kv = t.match(
-      /["']?[A-Za-z_][A-Za-z0-9_]*["']?\s*[:=]\s*["']([A-Za-z0-9_\-./+=]{8,})["']/
+      /["']?[A-Za-z_][A-Za-z0-9_]*["']?\s*[:=]\s*["']?([A-Za-z0-9_\-./+=]{8,})["']?/
     );
     const candidate = kv ? kv[1] : null;
     if (!candidate) return null;
@@ -1782,14 +1827,16 @@ ${config}`;
     return unique(out);
   }
   function pickBestUrl(urls, text) {
-    if (urls.length === 0) return null;
-    const scored = urls.map((u) => {
+    const usable = urls.filter((u) => !isForumEndpoint(u));
+    if (usable.length === 0) return null;
+    const scored = usable.map((u) => {
       let s = 0;
       const lower = u.toLowerCase();
       if (/anthropic|claude/.test(lower)) s += 3;
       if (/openai|codex/.test(lower)) s += 2;
       if (/api\./.test(lower)) s += 1;
       if (/127\.0\.0\.1|localhost/.test(lower)) s += 1;
+      if (/usage|billing|dashboard|docs\.|status\.|github\.com|linux\.do/.test(lower)) s -= 2;
       if (new RegExp(`(?:BASE_URL|endpoint|baseUrl)[^\\n]{0,40}${escapeRegExp(u.slice(0, 30))}`, "i").test(text)) {
         s += 2;
       }
@@ -1812,7 +1859,18 @@ ${config}`;
     return maybeDecodeKey(scored[0].k);
   }
   function cleanUrl(u) {
-    return String(u || "").trim().replace(/[.,;:!?）)」』】"'`]+$/g, "").replace(/^["'`]+/, "");
+    const s = String(u || "").trim().replace(/^["'`]+/, "").replace(/[.,;:!?」』】"'`]+$/g, "");
+    return stripUnbalancedTrailingParens(s);
+  }
+  function stripUnbalancedTrailingParens(s) {
+    let out = s;
+    while (/[)）]$/.test(out)) {
+      const opens = (out.match(/[(（]/g) || []).length;
+      const closes = (out.match(/[)）]/g) || []).length;
+      if (closes <= opens) break;
+      out = out.slice(0, -1);
+    }
+    return out;
   }
   function scoreFields(fields, app) {
     let s = 0.3;
@@ -1826,6 +1884,9 @@ ${config}`;
     }
     if (app) s += 0.1;
     return Math.min(1, Math.max(0, s));
+  }
+  function isFieldDerivedWarning(w) {
+    return /^未识别到 (?:API Key|endpoint\/base URL)/.test(w) || /^endpoint 已阻止/.test(w) || /^非本机 HTTP endpoint/.test(w) || /^apiKey /.test(w);
   }
   function buildWarnings(fields) {
     const w = [];
@@ -1893,6 +1954,7 @@ ${config}`;
   var MODEL_RES = [
     // Claude (longer / more specific first). Full ids with date or minor:
     //   claude-sonnet-4-20250514, claude-opus-4-1, claude-haiku-4.5
+    /claude-3\.7-sonnet(?:-\d{8})?/gi,
     /claude-3\.5-sonnet(?:-\d{8})?/gi,
     /claude-3-sonnet(?:-\d{8})?/gi,
     /claude-3\.5-haiku(?:-\d{8})?/gi,
@@ -1902,16 +1964,16 @@ ${config}`;
     /\bclaude-sonnet\b/gi,
     /\bclaude-haiku\b/gi,
     /\bclaude-opus\b/gi,
-    // OpenAI
-    /gpt-5\.?6-sol/gi,
-    /gpt-5\.?5/gi,
+    // OpenAI — generic gpt-5 line covers gpt-5/5.1/5-pro/5.1-codex/5.5/5.6-sol…
+    /gpt-5(?:\.\d+)?(?:-(?:pro|codex|mini|nano|sol|chat))?(?![a-z0-9.-])/gi,
+    /gpt-4\.1(?:-(?:mini|nano))?(?![a-z0-9.-])/gi,
     /gpt-4\.?5[a-z-]*(?:turbo|preview)?/gi,
     /gpt-4o(?:-mini|-preview)?/gi,
     /gpt-4-turbo(?:-preview)?/gi,
     /gpt-4-vision(?:-preview)?/gi,
     /gpt-4(?:-\d{4})?(?![a-z0-9.])/gi,
     /gpt-3\.5-turbo(?:-\d{4})?/gi,
-    /\bo3(?:-mini)?\b/gi,
+    /\bo[34](?:-(?:mini|pro))?\b/gi,
     /\bo1(?:-mini|-preview)?\b/gi,
     // Grok — accept "Grok4.5" / "grok4.5" (no hyphen)
     /(?<![a-z0-9])grok[-_]?4\.5(?![0-9])/gi,
@@ -1926,8 +1988,15 @@ ${config}`;
     /gemini-1\.5-(?:pro|flash)/gi,
     /gemini-pro/gi,
     /gemini-flash/gi,
+    // Chinese vendors common on linux.do relay shares (智谱 / 阿里 / Moonshot / 字节)
+    /\bglm-\d+(?:\.\d+)?(?:-(?:air|flash|plus))?/gi,
+    /\bqwen\d+(?:\.\d+)?(?:-[a-z0-9]+(?:-[a-z0-9]+)?)?/gi,
+    /\bqwq-?\d+(?:\.\d+)?(?:-[a-z0-9]+)?/gi,
+    /\bkimi-(?:k\d+(?:\.\d+)?|\d+(?:\.\d+)?)/gi,
+    /\bdoubao-(?:seed-)?\d+(?:\.\d+)?(?:-(?:pro|lite|flash|thinking))?/gi,
     // DeepSeek — require full minor when present so deepseek-v3.2 is not truncated
     /deepseek-v3(?:\.\d+)?/gi,
+    /deepseek-r\d+(?:\.\d+)?/gi,
     /deepseek-coder(?:-v2)?/gi,
     /deepseek-chat/gi
   ];
@@ -1983,7 +2052,7 @@ ${config}`;
   }
   function filterModelsForApp(models, app) {
     if (!app || !models.length) return models.slice();
-    const prefer = app === "claude" ? (m) => /claude/i.test(m) : app === "codex" ? (m) => /gpt|o1|o3|codex/i.test(m) : () => false;
+    const prefer = app === "claude" ? (m) => /claude/i.test(m) : app === "codex" ? (m) => /gpt|codex/i.test(m) || /^o\d/i.test(m) : () => false;
     return models.slice().sort((a, b) => Number(prefer(b)) - Number(prefer(a)));
   }
   function chooseModelForApp(models, app, manualSelection, detectedDefault) {
@@ -1995,17 +2064,19 @@ ${config}`;
       return ordered.find((model) => /claude.*sonnet|sonnet.*claude/i.test(model)) || ordered.find((model) => /claude/i.test(model)) || (detectedDefault && ordered.includes(detectedDefault) ? detectedDefault : null) || ordered[0];
     }
     if (app === "codex") {
-      return ordered.find((model) => /gpt|(?:^|[-_])o[13](?:$|[-_])|codex/i.test(model)) || (detectedDefault && ordered.includes(detectedDefault) ? detectedDefault : null) || ordered[0];
+      return ordered.find((model) => /gpt|codex/i.test(model) || /^o\d/i.test(model)) || (detectedDefault && ordered.includes(detectedDefault) ? detectedDefault : null) || ordered[0];
     }
     return detectedDefault && ordered.includes(detectedDefault) ? detectedDefault : ordered[0];
   }
 
   // userscript/ui-main.js
-  var SCRIPT_VERSION = "1.2.11";
+  var SCRIPT_VERSION = "1.2.12";
   var ROOT_ID = "ccs-ld-root";
   var Z = 2147483e3;
   var lastSelectionText = "";
   var hideTimer = null;
+  var scrollRaf = 0;
+  var lastConfigCheck = { text: null, ok: false };
   var selectedApp = null;
   var currentResult = null;
   var currentModelInfo = null;
@@ -2242,10 +2313,7 @@ ${config}`;
     const plain = String(sel.toString() || "").trim();
     if (!plain) return "";
     const anchors = collectAnchorsInSelection(sel);
-    if (typeof enrichTextWithAnchorHrefs === "function") {
-      return String(enrichTextWithAnchorHrefs(plain, anchors) || plain).trim();
-    }
-    return plain;
+    return String(enrichTextWithAnchorHrefs(plain, anchors) || plain).trim();
   }
   function collectAnchorsInSelection(sel) {
     const out = [];
@@ -2322,7 +2390,7 @@ ${config}`;
     const text = getSelectionText();
     lastSelectionText = text;
     const { btn } = getUi();
-    if (!text || !looksLikeConfig(text)) {
+    if (!text || !checkLooksLikeConfig(text)) {
       btn.classList.remove("show");
       return;
     }
@@ -2333,6 +2401,12 @@ ${config}`;
     }
     positionButton(rect);
     btn.classList.add("show");
+  }
+  function checkLooksLikeConfig(text) {
+    if (text === lastConfigCheck.text) return lastConfigCheck.ok;
+    const ok = looksLikeConfig(text);
+    lastConfigCheck = { text, ok };
+    return ok;
   }
   function scheduleUpdate() {
     clearTimeout(hideTimer);
@@ -2356,7 +2430,7 @@ ${config}`;
     selectedApp = result.app;
     selectedModel = null;
     manualModelSelection = false;
-    includeFullConfig = shouldIncludeFullConfigByDefault(result.config);
+    includeFullConfig = shouldIncludeFullConfigByDefault(result.config, result.configFormat);
     includeRiskyParams = false;
     refreshModelInfo(text);
     rebuildDeeplink();
@@ -2364,16 +2438,16 @@ ${config}`;
   }
   function refreshModelInfo(sourceText) {
     const text = sourceText || lastSelectionText || "";
-    let info = typeof extractModels === "function" ? extractModels(text) : { model: null, haikuModel: null, sonnetModel: null, opusModel: null, models: [] };
+    let info = extractModels(text);
     const detectedModels = info.models || [];
     if (detectedModels.length) {
-      const preferred = typeof chooseModelForApp === "function" ? chooseModelForApp(
+      const preferred = chooseModelForApp(
         detectedModels,
         selectedApp,
         manualModelSelection ? selectedModel : null,
         info.model
-      ) : detectedModels[0];
-      const models2 = typeof filterModelsForApp === "function" && selectedApp ? filterModelsForApp(detectedModels, selectedApp) : detectedModels.slice();
+      );
+      const models2 = selectedApp ? filterModelsForApp(detectedModels, selectedApp) : detectedModels.slice();
       selectedModel = preferred;
       info = { ...info, models: models2, model: preferred };
     } else {
@@ -2442,8 +2516,8 @@ ${config}`;
     const ver = typeof SCRIPT_VERSION !== "undefined" && SCRIPT_VERSION ? String(SCRIPT_VERSION) : "dev";
     shadow.getElementById("meta").textContent = `\u8BC6\u522B\uFF1A${result.source} \xB7 \u7F6E\u4FE1\u5EA6 ${conf}%` + (candCount > 1 ? ` \xB7 \u5019\u9009 ${candIdx}/${candCount}` : "") + (modelCount ? ` \xB7 \u6A21\u578B\xD7${modelCount}` : "") + ` \xB7 v${ver}`;
     const modelLine = (currentModelInfo == null ? void 0 : currentModelInfo.model) ? escapeHtml(currentModelInfo.model) + (modelCount > 1 ? ` <span style="opacity:.65">(+${modelCount - 1})</span>` : "") : modelCount ? escapeHtml(currentModelInfo.models.slice(0, 3).join(", ")) + (modelCount > 3 ? "\u2026" : "") : "\u2014";
-    const configInfo = result.config && typeof describeConfigPayload === "function" ? describeConfigPayload(result.config) : result.config ? { fields: [], sizeBytes: String(result.config).length } : null;
-    const providerInfo = result.providerParams && typeof describeProviderParams === "function" ? describeProviderParams(result.providerParams) : null;
+    const configInfo = result.config ? describeConfigPayload(result.config, result.configFormat) : null;
+    const providerInfo = result.providerParams ? describeProviderParams(result.providerParams) : null;
     const fields = shadow.getElementById("fields");
     fields.innerHTML = `
     <div><span class="k">name</span>${escapeHtml(result.name || "")}</div>
@@ -2751,7 +2825,13 @@ ${config}`;
     document.addEventListener("keydown", onKeydown);
     window.addEventListener("scroll", () => {
       const { btn } = getUi();
-      if (btn.classList.contains("show")) updateSelectionUi();
+      if (!btn.classList.contains("show") || scrollRaf) return;
+      scrollRaf = requestAnimationFrame(() => {
+        scrollRaf = 0;
+        const rect = getSelectionRect();
+        if (rect) positionButton(rect);
+        else btn.classList.remove("show");
+      });
     }, true);
     getUi();
   }
