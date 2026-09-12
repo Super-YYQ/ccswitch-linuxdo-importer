@@ -63,11 +63,8 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          npx esbuild scripts/release-guard.mjs \
-            --bundle \
-            --platform=node \
-            --format=esm \
-            --outfile=dist/release-guard.mjs
+          # Single source of truth for this command: package.json `build:guard`.
+          npm run build:guard
           test -f dist/release-guard.mjs
           # Smoke: first-publish path must allow
           node dist/release-guard.mjs "" "0.0.1" - package.json

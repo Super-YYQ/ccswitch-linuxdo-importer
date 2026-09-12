@@ -1322,3 +1322,185 @@ describe('deeplink finalize', () => {
     assert.equal(r.endpoint, 'https://api.example.com/v1')
   })
 })
+
+describe('regression · unquoted field=value base64 wrapper (#1)', () => {
+  it('unwraps unquoted api_key=sk-… fragment decoded from a JSON key field', () => {
+    // The v1.2.9 unwrap only handled quoted `"FIELD": "value"` fragments. A blob
+    // decoding to unquoted `api_key=sk-…` must yield the bare key too — never the
+    // whole fragment (which would silently break the generated deeplink).
+    const key = SYNTH.skPlain
+    const b64 = base64Encode(`api_key=${key}`)
+    const share = JSON.stringify({ url: SYNTH.endpointV1, key: b64 })
+    const r = parseShareText(share)
+    assert.ok(r)
+    assert.equal(r.apiKey, key)
+    assert.equal(r.endpoint, SYNTH.endpointV1)
+  })
+
+  it('unwraps unquoted field=value fragments via toml/env and labeled paths', () => {
+    const key = SYNTH.skPlain
+    for (const field of ['api_key', 'OPENAI_API_KEY', 'token']) {
+      const b64 = base64Encode(`${field}=${key}`)
+      const toml = parseShareText(`base_url = "https://ricktoken.example.net"\napi_key = "${b64}"`)
+      assert.ok(toml, `toml field ${field} should parse`)
+      assert.equal(toml.apiKey, key, `toml field ${field}`)
+
+      const labeled = parseShareText(`key（base64）：${b64}\nbase_url = "https://ricktoken.example.net"`)
+      assert.ok(labeled, `labeled field ${field} should parse`)
+      assert.equal(labeled.apiKey, key, `labeled field ${field}`)
+    }
+  })
+
+  it('never carries a field= wrapper into the deeplink apiKey', () => {
+    const key = SYNTH.skPlain
+    const b64 = base64Encode(`api_key=${key}`)
+    const share = JSON.stringify({ url: SYNTH.endpointV1, key: b64 })
+    const r = parseShareText(share)
+    assert.ok(r)
+    const link = buildDeeplink(r, 'claude')
+    const qs = new URLSearchParams(link.slice(link.indexOf('?') + 1))
+    assert.equal(qs.get('apiKey'), key)
+  })
+})
+
+describe('regression · forum links are not API endpoints (#2)', () => {
+  it('does not recover a linux.do topic link as endpoint for key-only JSON shares', () => {
+    const text = `{"key":"${SYNTH.skAnt}","name":"x"} 详见 https://linux.do/t/topic/123456`
+    const r = parseShareText(text)
+    assert.ok(r)
+    assert.equal(r.apiKey, SYNTH.skAnt)
+    assert.notEqual(r.endpoint, 'https://linux.do/t/topic/123456')
+    assert.equal(r.endpoint, null)
+    assert.ok(r.warnings.some((w) => /endpoint|base URL/i.test(w)))
+  })
+
+  it('does not use linux.do links as mixed-path endpoint candidates', () => {
+    // Whole-post selection: topic link + key but no real API URL → endpoint stays null.
+    const text = `佬友们自取\n${SYNTH.skAnt}\n原帖 https://linux.do/t/topic/123456 欢迎反馈`
+    const r = parseShareText(text)
+    assert.ok(r)
+    assert.equal(r.apiKey, SYNTH.skAnt)
+    for (const c of r.candidates || []) {
+      assert.ok(!c.endpoint || !/linux\.do/.test(c.endpoint), `candidate endpoint ${c.endpoint}`)
+    }
+    assert.equal(r.endpoint, null)
+  })
+
+  it('still accepts a real endpoint alongside a linux.do topic link', () => {
+    const text = `url：${SYNTH.endpointV1}\nkey：${SYNTH.skPlain}\n原帖 https://linux.do/t/topic/123456`
+    const r = parseShareText(text)
+    assert.ok(r)
+    assert.equal(r.endpoint, SYNTH.endpointV1)
+    assert.equal(r.apiKey, SYNTH.skPlain)
+  })
+})
+
+describe('regression · candidate sync + warnings survival (#4 #5)', () => {
+  it('keeps the stitched endpoint on ALL candidate pairs, not just the active one (#4)', () => {
+    // Two bare keys + a base64 blob that only carries base_url: the merge stitches
+    // endpoint from the blob and key from the mixed scan. Switching candidates in
+    // the confirm card must not drop the stitched endpoint.
+    const k1 = SYNTH.skAntA
+    const k2 = SYNTH.skAntB
+    const b64 = base64Encode('base_url=https://hidden.example.invalid/v1')
+    const text = `${k1}\n${k2}\n${b64}`
+    const r = parseShareText(text)
+    assert.ok(r)
+    assert.equal(r.endpoint, 'https://hidden.example.invalid/v1')
+    assert.ok((r.candidates?.length || 0) >= 2, 'expected multi candidates')
+    for (const c of r.candidates) {
+      assert.equal(c.endpoint, 'https://hidden.example.invalid/v1', 'every pair inherits stitched endpoint')
+    }
+    const alt = selectCandidate(r, 1)
+    assert.equal(alt.apiKey, k2)
+    assert.equal(alt.endpoint, 'https://hidden.example.invalid/v1')
+  })
+
+  it('preserves the multi-candidate summary warning through selectCandidate (#5)', () => {
+    const text = `url：${SYNTH.endpointV1}\nkey：${SYNTH.skPlain}\n备用 ${SYNTH.skAntA}`
+    const r = parseShareText(text)
+    assert.ok(r)
+    assert.ok((r.candidates?.length || 0) > 1)
+    assert.ok(r.warnings.some((w) => /候选/.test(w)), 'mixed parser should emit candidate summary')
+    const alt = selectCandidate(r, 1)
+    assert.ok(
+      alt.warnings.some((w) => /候选/.test(w)),
+      `summary must survive selectCandidate, got ${JSON.stringify(alt.warnings)}`,
+    )
+  })
+
+  it('preserves parser warnings through the merge/stitch path (#5)', () => {
+    const k1 = SYNTH.skAntA
+    const k2 = SYNTH.skAntB
+    const b64 = base64Encode('base_url=https://hidden.example.invalid/v1')
+    const text = `${k1}\n${k2}\n${b64}`
+    const r = parseShareText(text)
+    assert.ok(r)
+    assert.ok(
+      r.warnings.some((w) => /候选/.test(w)),
+      `candidate summary must survive merge, got ${JSON.stringify(r.warnings)}`,
+    )
+  })
+
+  it('still recomputes field-derived warnings for the new active pair (#5 sanity)', () => {
+    // Switching to a key-only pair must DROP the now-false "endpoint missing"
+    // warning only when the pair actually has an endpoint; here the stitched
+    // endpoint exists, so the endpoint-missing warning must stay gone.
+    const text = `url：${SYNTH.endpointV1}\nkey：${SYNTH.skPlain}\n备用 ${SYNTH.skAntA}`
+    const r = parseShareText(text)
+    assert.ok(r)
+    const alt = selectCandidate(r, 1)
+    assert.ok(!alt.warnings.some((w) => /未识别到 endpoint/.test(w)))
+  })
+})
+
+describe('regression · parser edge fixes (#6–#9)', () => {
+  it('treats TOML deeplink config as TOML, not broken JSON (#6)', () => {
+    const toml = 'model_provider = "openai"\nmodel = "gpt-5"\npreferred_auth_method = "apikey"\n'
+    const link =
+      `ccswitch://v1/import?resource=provider&app=codex&name=X` +
+      `&endpoint=${encodeURIComponent(SYNTH.endpointV1)}` +
+      `&apiKey=${SYNTH.skPlain}` +
+      `&config=${encodeURIComponent(base64Encode(toml))}&configFormat=toml`
+    const r = parseShareText(link)
+    assert.ok(r)
+    assert.equal(r.configFormat, 'toml')
+    const info = describeConfigPayload(r.config, r.configFormat)
+    assert.equal(info.risky, false, `toml config must not be risky: ${info.riskReasons}`)
+    assert.ok(info.fields.includes('model_provider'))
+    assert.equal(shouldIncludeFullConfigByDefault(r.config, r.configFormat), true)
+    // Regenerated deeplink must keep the config by default (was silently dropped)
+    const out = buildDeeplink(r, 'codex')
+    assert.ok(out.includes('config='), 'regenerated deeplink should carry the TOML config')
+  })
+
+  it('still flags risky TOML fields (#6 sanity)', () => {
+    const toml = 'model = "gpt-5"\nusage_script = "curl evil.example"\n'
+    const info = describeConfigPayload(toml, 'toml')
+    assert.equal(info.risky, true)
+    assert.equal(shouldIncludeFullConfigByDefault(toml, 'toml'), false)
+  })
+
+  it('keeps # inside quoted env values instead of comment-stripping (#7)', () => {
+    // A quoted value is literal: OPENAI_API_KEY="sk-abc #tail" must not truncate
+    // at the #. (Whitespace inside the key is normalized away downstream.)
+    const text = `OPENAI_BASE_URL=${SYNTH.endpointV1}\nOPENAI_API_KEY="sk-test-only-abcdef123456 #literal"`
+    const r = parseShareText(text)
+    assert.ok(r)
+    assert.equal(r.apiKey, 'sk-test-only-abcdef123456#literal')
+  })
+
+  it('keeps balanced parentheses in endpoint paths (#9)', () => {
+    const text = `url：https://api.example.invalid/v1(beta)\nkey：${SYNTH.skPlain}`
+    const r = parseShareText(text)
+    assert.ok(r)
+    assert.equal(r.endpoint, 'https://api.example.invalid/v1(beta)')
+  })
+
+  it('still strips an unbalanced prose paren after a URL (#9 sanity)', () => {
+    const text = `(配置 https://api.example.invalid/v1)\nkey：${SYNTH.skPlain}`
+    const r = parseShareText(text)
+    assert.ok(r)
+    assert.equal(r.endpoint, 'https://api.example.invalid/v1')
+  })
+})

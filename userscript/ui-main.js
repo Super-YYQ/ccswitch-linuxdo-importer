@@ -30,6 +30,9 @@ const Z = 2147483000
 
 let lastSelectionText = ''
 let hideTimer = null
+let scrollRaf = 0
+/** Memoized looksLikeConfig verdict for the current selection text. */
+let lastConfigCheck = { text: null, ok: false }
 let selectedApp = null
 let currentResult = null
 let currentModelInfo = null
@@ -279,10 +282,7 @@ function getSelectionText() {
   const plain = String(sel.toString() || '').trim()
   if (!plain) return ''
   const anchors = collectAnchorsInSelection(sel)
-  if (typeof enrichTextWithAnchorHrefs === 'function') {
-    return String(enrichTextWithAnchorHrefs(plain, anchors) || plain).trim()
-  }
-  return plain
+  return String(enrichTextWithAnchorHrefs(plain, anchors) || plain).trim()
 }
 
 /**
@@ -380,7 +380,7 @@ function updateSelectionUi() {
   const text = getSelectionText()
   lastSelectionText = text
   const { btn } = getUi()
-  if (!text || !looksLikeConfig(text)) {
+  if (!text || !checkLooksLikeConfig(text)) {
     btn.classList.remove('show')
     return
   }
@@ -391,6 +391,14 @@ function updateSelectionUi() {
   }
   positionButton(rect)
   btn.classList.add('show')
+}
+
+/** looksLikeConfig runs ~15 regexes over up to 64 KiB — memoize per text. */
+function checkLooksLikeConfig(text) {
+  if (text === lastConfigCheck.text) return lastConfigCheck.ok
+  const ok = looksLikeConfig(text)
+  lastConfigCheck = { text, ok }
+  return ok
 }
 
 function scheduleUpdate() {
@@ -419,7 +427,7 @@ function onImportClick(e) {
   selectedApp = result.app
   selectedModel = null
   manualModelSelection = false
-  includeFullConfig = shouldIncludeFullConfigByDefault(result.config)
+  includeFullConfig = shouldIncludeFullConfigByDefault(result.config, result.configFormat)
   includeRiskyParams = false
   refreshModelInfo(text)
   rebuildDeeplink()
@@ -432,26 +440,19 @@ function onImportClick(e) {
  */
 function refreshModelInfo(sourceText) {
   const text = sourceText || lastSelectionText || ''
-  let info =
-    typeof extractModels === 'function'
-      ? extractModels(text)
-      : { model: null, haikuModel: null, sonnetModel: null, opusModel: null, models: [] }
+  let info = extractModels(text)
 
   const detectedModels = info.models || []
   if (detectedModels.length) {
-    const preferred =
-      typeof chooseModelForApp === 'function'
-        ? chooseModelForApp(
-            detectedModels,
-            selectedApp,
-            manualModelSelection ? selectedModel : null,
-            info.model,
-          )
-        : detectedModels[0]
-    const models =
-      typeof filterModelsForApp === 'function' && selectedApp
-        ? filterModelsForApp(detectedModels, selectedApp)
-        : detectedModels.slice()
+    const preferred = chooseModelForApp(
+      detectedModels,
+      selectedApp,
+      manualModelSelection ? selectedModel : null,
+      info.model,
+    )
+    const models = selectedApp
+      ? filterModelsForApp(detectedModels, selectedApp)
+      : detectedModels.slice()
     selectedModel = preferred
     info = { ...info, models, model: preferred }
   } else {
@@ -541,16 +542,12 @@ function renderCard(result) {
         (modelCount > 3 ? '…' : '')
       : '—'
 
-  const configInfo =
-    result.config && typeof describeConfigPayload === 'function'
-      ? describeConfigPayload(result.config)
-      : result.config
-        ? { fields: [], sizeBytes: String(result.config).length }
-        : null
-  const providerInfo =
-    result.providerParams && typeof describeProviderParams === 'function'
-      ? describeProviderParams(result.providerParams)
-      : null
+  const configInfo = result.config
+    ? describeConfigPayload(result.config, result.configFormat)
+    : null
+  const providerInfo = result.providerParams
+    ? describeProviderParams(result.providerParams)
+    : null
 
   const fields = shadow.getElementById('fields')
   fields.innerHTML = `
@@ -931,7 +928,16 @@ function init() {
   document.addEventListener('keydown', onKeydown)
   window.addEventListener('scroll', () => {
     const { btn } = getUi()
-    if (btn.classList.contains('show')) updateSelectionUi()
+    if (!btn.classList.contains('show') || scrollRaf) return
+    // Scrolling never changes the selection text — only reposition the button,
+    // throttled to one rAF tick. (Previously every scroll event re-ran the full
+    // selection read + looksLikeConfig regex battery.)
+    scrollRaf = requestAnimationFrame(() => {
+      scrollRaf = 0
+      const rect = getSelectionRect()
+      if (rect) positionButton(rect)
+      else btn.classList.remove('show')
+    })
   }, true)
   getUi()
 }

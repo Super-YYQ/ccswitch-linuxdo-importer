@@ -183,3 +183,68 @@ describe('filterModelsForApp', () => {
     assert.equal(chooseModelForApp(models, 'codex', 'removed-model'), 'gpt-5.5')
   })
 })
+
+describe('regression · current model ids (#3)', () => {
+  it('extracts OpenAI 2025+ ids (gpt-5 family / gpt-4.1 / o4-mini / o3-pro)', () => {
+    for (const id of [
+      'gpt-5',
+      'gpt-5.1',
+      'gpt-5-pro',
+      'gpt-5.1-codex',
+      'gpt-5.5',
+      'gpt-4.1',
+      'gpt-4.1-mini',
+      'o4-mini',
+      'o3-pro',
+    ]) {
+      const r = extractModels(`模型：${id}`)
+      assert.ok(r.models.includes(id), `expected ${id}, got ${JSON.stringify(r.models)}`)
+    }
+  })
+
+  it('extracts claude-3.7-sonnet with optional date suffix', () => {
+    assert.ok(extractModels('转发 claude-3.7-sonnet').models.includes('claude-3.7-sonnet'))
+    const dated = extractModels('claude-3.7-sonnet-20250224 可用')
+    assert.ok(dated.models.includes('claude-3.7-sonnet-20250224'))
+    assert.equal(dated.sonnetModel, 'claude-3.7-sonnet-20250224')
+  })
+
+  it('extracts Chinese vendor ids common on linux.do (glm/qwen/kimi/doubao/deepseek-r)', () => {
+    for (const id of [
+      'glm-4.6',
+      'glm-4.5-air',
+      'qwen3',
+      'qwen3-235b-a22b',
+      'qwen2.5-coder',
+      'kimi-k2',
+      'kimi-k1.5',
+      'doubao-seed-1.6',
+      'doubao-1.5-pro',
+      'deepseek-r1',
+    ]) {
+      const r = extractModels(`支持 ${id} 模型`)
+      assert.ok(r.models.includes(id), `expected ${id}, got ${JSON.stringify(r.models)}`)
+    }
+  })
+
+  it('codex app prefers o4-mini / gpt-5 over claude models', () => {
+    assert.equal(chooseModelForApp(['claude-sonnet-4-5', 'o4-mini'], 'codex'), 'o4-mini')
+    // Among preferred families the document order wins (established semantics:
+    // o-series and gpt are equal-rank preferences, first in text takes it).
+    assert.equal(
+      chooseModelForApp(['claude-sonnet-4-5', 'o4-mini', 'gpt-5'], 'codex'),
+      'o4-mini',
+    )
+    assert.equal(
+      chooseModelForApp(['claude-sonnet-4-5', 'gpt-5', 'o4-mini'], 'codex'),
+      'gpt-5',
+    )
+    const ordered = filterModelsForApp(['claude-sonnet-4-5', 'gpt-4.1'], 'codex')
+    assert.equal(ordered[0], 'gpt-4.1')
+  })
+
+  it('does not invent models from unrelated prose', () => {
+    assert.equal(extractModels('glm 的一般讨论，没有版本号').models.length, 0)
+    assert.equal(extractModels('qwen 是通义千问的英文名').models.length, 0)
+  })
+})

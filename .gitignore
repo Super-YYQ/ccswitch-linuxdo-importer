@@ -13,4 +13,6 @@ test-results/
 playwright-report/
 # Bundled release-guard (built in CI read-only job; not committed).
 dist/
+# planning-with-files working memory (local only).
+.planning/
 

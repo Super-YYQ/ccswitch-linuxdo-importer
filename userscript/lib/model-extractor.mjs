@@ -21,6 +21,7 @@
 const MODEL_RES = [
   // Claude (longer / more specific first). Full ids with date or minor:
   //   claude-sonnet-4-20250514, claude-opus-4-1, claude-haiku-4.5
+  /claude-3\.7-sonnet(?:-\d{8})?/gi,
   /claude-3\.5-sonnet(?:-\d{8})?/gi,
   /claude-3-sonnet(?:-\d{8})?/gi,
   /claude-3\.5-haiku(?:-\d{8})?/gi,
@@ -30,16 +31,16 @@ const MODEL_RES = [
   /\bclaude-sonnet\b/gi,
   /\bclaude-haiku\b/gi,
   /\bclaude-opus\b/gi,
-  // OpenAI
-  /gpt-5\.?6-sol/gi,
-  /gpt-5\.?5/gi,
+  // OpenAI — generic gpt-5 line covers gpt-5/5.1/5-pro/5.1-codex/5.5/5.6-sol…
+  /gpt-5(?:\.\d+)?(?:-(?:pro|codex|mini|nano|sol|chat))?(?![a-z0-9.-])/gi,
+  /gpt-4\.1(?:-(?:mini|nano))?(?![a-z0-9.-])/gi,
   /gpt-4\.?5[a-z-]*(?:turbo|preview)?/gi,
   /gpt-4o(?:-mini|-preview)?/gi,
   /gpt-4-turbo(?:-preview)?/gi,
   /gpt-4-vision(?:-preview)?/gi,
   /gpt-4(?:-\d{4})?(?![a-z0-9.])/gi,
   /gpt-3\.5-turbo(?:-\d{4})?/gi,
-  /\bo3(?:-mini)?\b/gi,
+  /\bo[34](?:-(?:mini|pro))?\b/gi,
   /\bo1(?:-mini|-preview)?\b/gi,
   // Grok — accept "Grok4.5" / "grok4.5" (no hyphen)
   /(?<![a-z0-9])grok[-_]?4\.5(?![0-9])/gi,
@@ -54,8 +55,15 @@ const MODEL_RES = [
   /gemini-1\.5-(?:pro|flash)/gi,
   /gemini-pro/gi,
   /gemini-flash/gi,
+  // Chinese vendors common on linux.do relay shares (智谱 / 阿里 / Moonshot / 字节)
+  /\bglm-\d+(?:\.\d+)?(?:-(?:air|flash|plus))?/gi,
+  /\bqwen\d+(?:\.\d+)?(?:-[a-z0-9]+(?:-[a-z0-9]+)?)?/gi,
+  /\bqwq-?\d+(?:\.\d+)?(?:-[a-z0-9]+)?/gi,
+  /\bkimi-(?:k\d+(?:\.\d+)?|\d+(?:\.\d+)?)/gi,
+  /\bdoubao-(?:seed-)?\d+(?:\.\d+)?(?:-(?:pro|lite|flash|thinking))?/gi,
   // DeepSeek — require full minor when present so deepseek-v3.2 is not truncated
   /deepseek-v3(?:\.\d+)?/gi,
+  /deepseek-r\d+(?:\.\d+)?/gi,
   /deepseek-coder(?:-v2)?/gi,
   /deepseek-chat/gi,
 ]
@@ -158,7 +166,7 @@ export function filterModelsForApp(models, app) {
     app === 'claude'
       ? (m) => /claude/i.test(m)
       : app === 'codex'
-        ? (m) => /gpt|o1|o3|codex/i.test(m)
+        ? (m) => /gpt|codex/i.test(m) || /^o\d/i.test(m)
         : () => false
 
   return models.slice().sort((a, b) => Number(prefer(b)) - Number(prefer(a)))
@@ -190,7 +198,7 @@ export function chooseModelForApp(models, app, manualSelection, detectedDefault)
   }
   if (app === 'codex') {
     return (
-      ordered.find((model) => /gpt|(?:^|[-_])o[13](?:$|[-_])|codex/i.test(model)) ||
+      ordered.find((model) => /gpt|codex/i.test(model) || /^o\d/i.test(model)) ||
       (detectedDefault && ordered.includes(detectedDefault) ? detectedDefault : null) ||
       ordered[0]
     )

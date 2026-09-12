@@ -59,7 +59,9 @@ const RISKY_ENV_NAMES = new Set([
   'GIT_SSH_COMMAND',
 ])
 
-const URL_RE = /https?:\/\/[^\s"'`<>，。；、）)\]}]+/gi
+// Balanced single-level paren groups are allowed in paths (e.g. /v1(beta));
+// a lone ')' from surrounding prose still terminates the match.
+const URL_RE = /https?:\/\/(?:\([^\s"'`<>，。；、）)\]}]*\)|[^\s"'`<>，。；、）)\]}])+/gi
 // Discourse onebox / paste often drops the scheme: grok2api-v2.onrender.com
 // Require a multi-label host + common TLD.
 // Reject emails and host suffixes peeled from them:
@@ -223,28 +225,32 @@ function mergeParseResults(candidates) {
     if ((r.confidence || 0) > (best.confidence || 0)) {
       best.source = r.source
       best.confidence = r.confidence
-      best.warnings = r.warnings || best.warnings
       best.candidateCount = Math.max(best.candidateCount || 1, r.candidateCount || 1)
       best.app = r.app != null ? r.app : best.app
     }
   }
   if (!best.app) best.app = classifyApp('', best)
-  // Keep candidate pairs in sync with the stitched top-level fields. Stale
-  // key-only / endpoint-only pairs would otherwise be re-applied by
-  // finalizeResult and wipe a field merged from a different parser (e.g.
-  // base64 key fragment + env base_url line).
+  // Keep candidate pairs in sync with the stitched top-level fields. Partial
+  // pairs (key-only / endpoint-only) must inherit the stitched fields too —
+  // otherwise selectCandidate re-applies a stale pair and wipes a field merged
+  // from a different parser (e.g. base64 key fragment + env base_url line).
   if (best.candidates?.length) {
     const idx = Math.max(0, Math.min(best.candidateIndex || 0, best.candidates.length - 1))
     best.candidateIndex = idx
-    const current = best.candidates[idx]
-    if (current) {
-      best.candidates[idx] = {
-        endpoint: current.endpoint ?? best.endpoint,
-        apiKey: current.apiKey ?? best.apiKey,
-      }
+    best.candidates = best.candidates.map((c) => ({
+      endpoint: c.endpoint ?? best.endpoint,
+      apiKey: c.apiKey ?? best.apiKey,
+    }))
+  }
+  // Parser-generated notes (multi-candidate summary, oversized selection, prefix
+  // hint) survive; field-derived warnings are recomputed on the stitched fields.
+  const carried = []
+  for (const r of list) {
+    for (const w of r.warnings || []) {
+      if (!isFieldDerivedWarning(w)) carried.push(w)
     }
   }
-  best.warnings = buildWarnings(best)
+  best.warnings = Array.from(new Set([...carried, ...buildWarnings(best)]))
   best.confidence = scoreFields(best, best.app)
   return best.endpoint || best.apiKey ? best : null
 }
@@ -279,11 +285,10 @@ export function enrichTextWithAnchorHrefs(text, anchors) {
   const base = text == null ? '' : String(text)
   if (!anchors || anchors.length === 0) return base
 
+  // Cleaned forms of every URL already in the selection. Anchors whose href
+  // differs only by stripped trailing punctuation are caught by the
+  // existing.has(cleaned) / base.includes(cleaned) checks below.
   const existing = new Set(matchAll(base, URL_RE).map(cleanUrl))
-  for (const u of existing) {
-    // also mark raw occurrences
-    if (base.includes(u)) existing.add(u)
-  }
 
   /** @type {Array<{label: string, href: string, preferred: boolean}>} */
   const toAdd = []
@@ -432,7 +437,13 @@ export function repairBrokenBase64(text) {
  */
 function normalizeApiKey(raw, shareText = '') {
   if (raw == null || raw === '') return raw
-  const decoded = decodeKeyBody(raw)
+  let decoded = decodeKeyBody(raw)
+  // Last-resort unwrap: a decoded body that is still a labeled fragment
+  // (field=value / "field": "value") must never be imported verbatim as the key.
+  if (decoded && !hasKeyPrefix(decoded) && !lookLikeKeyValue(decoded)) {
+    const unwrapped = extractKeyFromWrapper(decoded)
+    if (unwrapped) decoded = unwrapped
+  }
   return applyKeyPrefixHints(decoded, shareText)
 }
 
@@ -599,13 +610,30 @@ function hasKeyShapedToken(text) {
 }
 
 /**
+ * True when a URL points at the linux.do forum itself. Topic/post links are
+ * never provider endpoints — recovering them as one produces a garbage
+ * deeplink with no warning, so they are filtered at collection time.
+ * @param {string} u
+ */
+function isForumEndpoint(u) {
+  try {
+    const host = new URL(String(u || '')).hostname.toLowerCase()
+    return host === 'linux.do' || host.endsWith('.linux.do')
+  } catch {
+    return false
+  }
+}
+
+/**
  * Collect http(s) URLs plus bare hosts normalized to https://.
- * Skips hosts already covered by a full URL match.
+ * Skips hosts already covered by a full URL match, and forum self-links.
  * @param {string} text
  * @returns {string[]}
  */
 function collectEndpoints(text) {
-  const full = matchAll(text, URL_RE).map(cleanUrl).filter((u) => isHttpUrl(u))
+  const full = matchAll(text, URL_RE)
+    .map(cleanUrl)
+    .filter((u) => isHttpUrl(u) && !isForumEndpoint(u))
   const bare = matchAll(text, BARE_HOST_RE)
     .map((h) => normalizeBareHost(h))
     .filter(Boolean)
@@ -625,6 +653,7 @@ function collectEndpoints(text) {
     if (covered.has(h.toLowerCase()) || covered.has(hostOnly)) continue
     // Skip if this "host" is actually inside an already-matched full URL string
     if (full.some((u) => u.toLowerCase().includes(hostOnly))) continue
+    if (isForumEndpoint(h)) continue
     bareUrls.push(h)
     covered.add(hostOnly)
   }
@@ -735,7 +764,7 @@ export function buildDeeplink(result, appOverride, modelInfo, options) {
   const includeConfig =
     options && Object.prototype.hasOwnProperty.call(options, 'includeConfig')
       ? options.includeConfig !== false
-      : shouldIncludeFullConfigByDefault(result.config)
+      : shouldIncludeFullConfigByDefault(result.config, result.configFormat)
   if (includeConfig && result.config) {
     params.set('config', base64Encode(result.config))
     params.set('configFormat', result.configFormat || 'json')
@@ -795,7 +824,12 @@ export function describeProviderParams(providerParams) {
 /**
  * Summarize attached full-config payload for confirm-card disclosure.
  * Field names only — never values. Nested `env` keys are expanded separately.
+ * TOML configs (Codex) get a lightweight line-based inspection instead of the
+ * JSON path — previously they fell into the JSON catch branch, were mislabeled
+ * "配置不是可解析的 JSON", marked risky, and default-dropped from regenerated
+ * deeplinks.
  * @param {string|null|undefined} config
+ * @param {string} [format] - 'json' (default) or 'toml'
  * @returns {{
  *   fields: string[],
  *   envFields: string[],
@@ -804,7 +838,7 @@ export function describeProviderParams(providerParams) {
  *   riskReasons: string[],
  * }|null}
  */
-export function describeConfigPayload(config) {
+export function describeConfigPayload(config, format) {
   if (!config) return null
   const raw = String(config)
   const sizeBytes =
@@ -819,19 +853,25 @@ export function describeConfigPayload(config) {
   let envFields = []
   /** @type {string[]} */
   const riskReasons = []
-  try {
-    const obj = JSON.parse(raw)
-    if (obj && typeof obj === 'object' && !Array.isArray(obj)) {
-      fields = Object.keys(obj)
-      const inspection = inspectConfigObject(obj)
-      envFields = inspection.envFields
-      riskReasons.push(...inspection.riskReasons)
-    } else {
-      riskReasons.push('配置根节点不是普通 JSON 对象')
+  if (String(format || 'json').toLowerCase() === 'toml') {
+    const inspection = inspectTomlConfig(raw)
+    fields = inspection.fields
+    riskReasons.push(...inspection.riskReasons)
+  } else {
+    try {
+      const obj = JSON.parse(raw)
+      if (obj && typeof obj === 'object' && !Array.isArray(obj)) {
+        fields = Object.keys(obj)
+        const inspection = inspectConfigObject(obj)
+        envFields = inspection.envFields
+        riskReasons.push(...inspection.riskReasons)
+      } else {
+        riskReasons.push('配置根节点不是普通 JSON 对象')
+      }
+    } catch {
+      fields = []
+      riskReasons.push('配置不是可解析的 JSON')
     }
-  } catch {
-    fields = []
-    riskReasons.push('配置不是可解析的 JSON')
   }
   return {
     fields,
@@ -840,6 +880,36 @@ export function describeConfigPayload(config) {
     risky: riskReasons.length > 0,
     riskReasons,
   }
+}
+
+/**
+ * Minimal TOML disclosure: collect top-level keys and [section] names, then run
+ * the same risky-name checks as JSON configs. Unknown TOML fields are NOT
+ * auto-flagged (Codex config schemas differ from env-shaped JSON), but known
+ * dangerous names (scripts, remote URLs, tokens) are.
+ * @param {string} raw
+ */
+function inspectTomlConfig(raw) {
+  const fields = new Set()
+  for (const line of String(raw).split(/\r?\n/)) {
+    const t = line.trim()
+    if (!t || t.startsWith('#')) continue
+    const section = t.match(/^\[\[?\s*([\w."'-]+)\s*\]?\]$/)
+    if (section) {
+      fields.add(section[1])
+      continue
+    }
+    const kv = t.match(/^([A-Za-z_][\w.-]*)\s*=/)
+    if (kv) fields.add(kv[1])
+  }
+  const list = Array.from(fields)
+  const riskReasons = []
+  const risky = list.filter((f) => isRiskyConfigFieldName(f) || isRiskyEnvName(f))
+  if (risky.length) {
+    riskReasons.push(`高风险字段：${risky.slice(0, 8).join('、')}`)
+  }
+  if (list.length === 0) riskReasons.push('配置不是可解析的 TOML')
+  return { fields: list, riskReasons }
 }
 
 /** Keys that are expected in ordinary provider env-shaped configs. */
@@ -999,11 +1069,12 @@ function inspectConfigObject(root) {
  * Default for the confirm-card "include full config" checkbox.
  * Ordinary env-shaped configs stay on; high-risk extras default off.
  * @param {string|null|undefined} config
+ * @param {string} [format] - 'json' (default) or 'toml'
  * @returns {boolean}
  */
-export function shouldIncludeFullConfigByDefault(config) {
+export function shouldIncludeFullConfigByDefault(config, format) {
   if (!config) return false
-  const info = describeConfigPayload(config)
+  const info = describeConfigPayload(config, format)
   if (!info) return false
   return !info.risky
 }
@@ -1105,7 +1176,10 @@ export function selectCandidate(result, index) {
     candidateIndex: i,
     candidateCount: list.length,
   }
-  next.warnings = buildWarnings(next)
+  // Parser-generated notes (multi-candidate summary, oversized selection, prefix
+  // hint) carry over; field-derived warnings are recomputed for the new pair.
+  const carried = (result.warnings || []).filter((w) => !isFieldDerivedWarning(w))
+  next.warnings = Array.from(new Set([...carried, ...buildWarnings(next)]))
   next.confidence = scoreFields(next, next.app)
   if (typeof next.confidence === 'number') {
     next.confidence = Math.min(1, Math.max(0, next.confidence))
@@ -1753,13 +1827,16 @@ function parseEnvMap(text) {
     if (!m) continue
     let val = m[2].trim()
     if (
-      (val.startsWith('"') && val.endsWith('"')) ||
-      (val.startsWith("'") && val.endsWith("'"))
+      val.length >= 2 &&
+      ((val.startsWith('"') && val.endsWith('"')) ||
+        (val.startsWith("'") && val.endsWith("'")))
     ) {
+      // Quoted values are literal — a '#' inside them is content, not a comment.
       val = val.slice(1, -1)
+    } else {
+      // strip trailing inline comments loosely (unquoted values only)
+      val = val.replace(/\s+#.*$/, '').trim()
     }
-    // strip trailing inline comments loosely
-    val = val.replace(/\s+#.*$/, '').trim()
     if (val) map[m[1]] = val
   }
   // also allow single-line KEY=value KEY2=value
@@ -2228,8 +2305,10 @@ function extractKeyFromWrapper(text) {
   const t = String(text || '').trim()
   if (!t || t.length > 1024) return null
   // Labeled fragment: "field": "value"  /  'field': 'value'  /  field=value
+  // Value quotes are optional — unquoted field=value bodies are common when the
+  // share base64-encodes an env-style line.
   const kv = t.match(
-    /["']?[A-Za-z_][A-Za-z0-9_]*["']?\s*[:=]\s*["']([A-Za-z0-9_\-./+=]{8,})["']/,
+    /["']?[A-Za-z_][A-Za-z0-9_]*["']?\s*[:=]\s*["']?([A-Za-z0-9_\-./+=]{8,})["']?/,
   )
   const candidate = kv ? kv[1] : null
   if (!candidate) return null
@@ -2443,14 +2522,18 @@ function extractBase64DecodedKeys(text) {
 }
 
 function pickBestUrl(urls, text) {
-  if (urls.length === 0) return null
-  const scored = urls.map((u) => {
+  // Forum self-links are never provider endpoints (same rule as collectEndpoints).
+  const usable = urls.filter((u) => !isForumEndpoint(u))
+  if (usable.length === 0) return null
+  const scored = usable.map((u) => {
     let s = 0
     const lower = u.toLowerCase()
     if (/anthropic|claude/.test(lower)) s += 3
     if (/openai|codex/.test(lower)) s += 2
     if (/api\./.test(lower)) s += 1
     if (/127\.0\.0\.1|localhost/.test(lower)) s += 1 // local proxy common
+    // demote billing / docs / dashboard style URLs (parity with scorePair)
+    if (/usage|billing|dashboard|docs\.|status\.|github\.com|linux\.do/.test(lower)) s -= 2
     // proximity to key words in original text
     if (new RegExp(`(?:BASE_URL|endpoint|baseUrl)[^\\n]{0,40}${escapeRegExp(u.slice(0, 30))}`, 'i').test(text)) {
       s += 2
@@ -2476,11 +2559,30 @@ function pickBestKey(keys) {
 }
 
 function cleanUrl(u) {
-  return String(u || '')
+  const s = String(u || '')
     .trim()
-    // trailing JSON / prose punctuation (Discourse selection often keeps the closing quote)
-    .replace(/[.,;:!?）)」』】"'`]+$/g, '')
+    // leading quotes left over from prose / JSON fragments
     .replace(/^["'`]+/, '')
+    // trailing JSON / prose punctuation, parens excluded (handled below)
+    .replace(/[.,;:!?」』】"'`]+$/g, '')
+  return stripUnbalancedTrailingParens(s)
+}
+
+/**
+ * Drop trailing ')' / '）' only while they are unmatched by an opening paren
+ * inside the URL, so parenthesised path segments survive but a prose paren
+ * around the whole URL does not leak in.
+ * @param {string} s
+ */
+function stripUnbalancedTrailingParens(s) {
+  let out = s
+  while (/[)）]$/.test(out)) {
+    const opens = (out.match(/[(（]/g) || []).length
+    const closes = (out.match(/[)）]/g) || []).length
+    if (closes <= opens) break
+    out = out.slice(0, -1)
+  }
+  return out
 }
 
 function scoreFields(fields, app) {
@@ -2496,6 +2598,23 @@ function scoreFields(fields, app) {
   }
   if (app) s += 0.1
   return Math.min(1, Math.max(0, s))
+}
+
+/**
+ * True for warnings produced by buildWarnings (derived from the current
+ * endpoint/apiKey fields). Parser-generated notes — multi-candidate summary,
+ * oversized-selection marker, "已根据文案补上前缀" — are NOT field-derived and
+ * must survive selectCandidate / mergeParseResults, which recompute field
+ * warnings from scratch.
+ * @param {string} w
+ */
+function isFieldDerivedWarning(w) {
+  return (
+    /^未识别到 (?:API Key|endpoint\/base URL)/.test(w) ||
+    /^endpoint 已阻止/.test(w) ||
+    /^非本机 HTTP endpoint/.test(w) ||
+    /^apiKey /.test(w)
+  )
 }
 
 function buildWarnings(fields) {
