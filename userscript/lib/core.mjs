@@ -118,11 +118,20 @@ const CONSUMED_PROVIDER_PARAM_NAMES = new Set([
 // base64-shared key decodes to `ark-<uuid>-<suffix>`. Listed here so decoded
 // bodies are accepted as keys and bare ark- tokens light the import button.
 // xai- = xAI Grok; gsk_ = Groq; pplx- = Perplexity; r8_ = Replicate;
-// hf_ = HuggingFace; fw_ = Fireworks. All carry a delimiter (-/_) and are
+// hf_ = HuggingFace; fw_ = Fireworks. oc_sk_ = OpenCode-style key. These carry a delimiter (-/_)
 // specific enough to avoid false matches (cross-checked vs gitleaks/n8n/pipelock).
-const KEY_PREFIX_RE = /^(sk-ant-|sk-|g2a_|tp-|nk-|pk-|rk-|ark-|xai-|gsk_|pplx-|r8_|hf_|fw_)/i
-const KEY_PREFIX_BODY_RE = /^(sk-ant-|sk-|g2a_|tp-|nk-|pk-|rk-|ark-|xai-|gsk_|pplx-|r8_|hf_|fw_|Bearer\s)/i
-const VENDOR_KEY_RE = /\b(?:g2a_|tp-|nk-|pk-|rk-|ark-|xai-|gsk_|pplx-|r8_|hf_|fw_)[A-Za-z0-9_\-]{8,}\b/g
+const KEY_PREFIX_RE = /^(sk-ant-|sk-|g2a_|tp-|nk-|pk-|rk-|ark-|xai-|gsk_|pplx-|r8_|hf_|fw_|oc_sk_)/i
+const KEY_PREFIX_BODY_RE = /^(sk-ant-|sk-|g2a_|tp-|nk-|pk-|rk-|ark-|xai-|gsk_|pplx-|r8_|hf_|fw_|oc_sk_|Bearer\s)/i
+const VENDOR_KEY_RE = /\b(?:g2a_|tp-|nk-|pk-|rk-|ark-|xai-|gsk_|pplx-|r8_|hf_|fw_|oc_sk_)[A-Za-z0-9_\-]{8,}\b/g
+
+// Official OpenCode Go API paths. They are suggestions for copying, not a
+// guessed endpoint in a CC Switch import link: models use different protocols.
+// https://opencode.ai/docs/go/#endpoints
+const OPENCODE_GO_ENDPOINTS = [
+  { label: 'Responses', url: 'https://opencode.ai/zen/go/v1/responses' },
+  { label: 'Chat Completions', url: 'https://opencode.ai/zen/go/v1/chat/completions' },
+  { label: 'Messages', url: 'https://opencode.ai/zen/go/v1/messages' },
+]
 
 /**
  * @typedef {'claude'|'codex'|null} AppKind
@@ -185,7 +194,8 @@ export function parseShareText(text) {
   const toml = tryParseTomlLike(cleaned)
   const env = tryParseEnv(cleaned)
   const mixed = tryParseMixed(cleaned)
-  const result = finalizeResult(mergeParseResults([b64, json, toml, env, mixed]), cleaned)
+  const parsed = mergeParseResults([b64, json, toml, env, mixed]) || tryParseStandaloneKey(cleaned)
+  const result = finalizeResult(parsed, cleaned)
   if (result && oversized) {
     result.warnings = [...(result.warnings || []), OVERSIZED_SELECTION_WARNING]
   }
@@ -559,6 +569,8 @@ export function looksLikeConfig(text) {
   if (/https?:\/\//i.test(t) && /[A-Za-z0-9+/]{32,}={0,2}/.test(t)) return true
   // standalone base64 only if it decodes to a key or config-shaped text (avoid AAAA… noise)
   if (hasUsefulBase64Blob(t)) return true
+  // A deliberately selected single token may be a prefix-less relay key.
+  if (standaloneKeyCandidate(t)) return true
   if (
     t.includes('{') &&
     t.includes('}') &&
@@ -571,6 +583,55 @@ export function looksLikeConfig(text) {
   // user must select a smaller block instead of silently hiding the trigger.
   if (sampled.oversized) return true
   return false
+}
+
+/** Official URL choices only when the topic title supplies the provider name. */
+export function suggestOpenCodeGoEndpoints(topicTitle, result) {
+  if (!result?.apiKey || result.endpoint) return []
+  if (!/\bopen\s*code\s*go\b/i.test(String(topicTitle || ''))) return []
+  return OPENCODE_GO_ENDPOINTS.map((entry) => ({ ...entry }))
+}
+
+/** Accept a single selected token as a low-confidence key candidate. */
+function tryParseStandaloneKey(text) {
+  const apiKey = standaloneKeyCandidate(text)
+  if (!apiKey) return null
+  return emptyResult({
+    apiKey,
+    confidence: scoreFields({ endpoint: null, apiKey }, null),
+    candidates: [{ endpoint: null, apiKey }],
+    warnings: ['仅根据单独选中的字符串识别为可能的 Key，请核对'],
+  })
+}
+
+function standaloneKeyCandidate(text) {
+  const token = String(text || '').trim()
+  if (token.length < 32 || token.length > 512 || /\s/.test(token)) return null
+  if (!/^[A-Za-z0-9+/_-]+={0,2}$/.test(token)) return null
+
+  // Treat canonical base64 as encoded content first. Encoded prose must not
+  // become a key merely because the encoded bytes look random.
+  if (token.length >= 40 && token.length % 4 !== 1) {
+    try {
+      const decoded = base64Decode(token)
+      const normalized = token.replace(/-/g, '+').replace(/_/g, '/').replace(/=+$/, '')
+      if (base64Encode(decoded).replace(/=+$/, '') === normalized) {
+        if (hasKeyPrefix(decoded) || looksLikeStandaloneKeyBody(decoded)) return decoded
+        return null
+      }
+    } catch {
+      /* not text base64 */
+    }
+  }
+  return looksLikeStandaloneKeyBody(token) ? token : null
+}
+
+function looksLikeStandaloneKeyBody(value) {
+  const s = String(value || '')
+  if (s.length < 32 || s.length > 256 || !/^[A-Za-z0-9_-]+$/.test(s)) return false
+  if (/^[0-9a-f-]+$/i.test(s) || /(?:your|please|example|xxxx|todo|changeme)/i.test(s)) return false
+  if (new Set(s).size < 8) return false
+  return /[A-Za-z]/.test(s) && /\d/.test(s)
 }
 
 /**

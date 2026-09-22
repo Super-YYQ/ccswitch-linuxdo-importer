@@ -12,6 +12,7 @@ import {
   describeConfigPayload,
   describeProviderParams,
   shouldIncludeFullConfigByDefault,
+  suggestOpenCodeGoEndpoints,
   MAX_DEEPLINK_LEN,
 } from '../userscript/lib/core.mjs'
 
@@ -51,6 +52,8 @@ const SYNTH = {
   r8: 'r8_testonlynotrealtoken0123456',
   hf: 'hf_testonlynotrealtoken0123456789abcdef',
   fw: 'fw_testonlynotrealtoken0123456789abcdefgh',
+  ocSk: 'oc_sk_TESTONLY0000000000000000000000000000',
+  bareKey: 'Ab9Cd8Ef7Gh6Ij5Kl4Mn3Op2Qr1St0Uv9Wx8Yz7',
   endpoint: 'https://api.example.invalid',
   endpointV1: 'https://api.example.invalid/v1',
   endpointAnthropic: 'https://api.example.invalid/anthropic',
@@ -173,6 +176,56 @@ describe('looksLikeConfig', () => {
     assert.equal(looksLikeConfig(SYNTH.fw), true)
     const r = parseShareText(`endpoint: https://api.fireworks.ai/inference/v1\nkey: ${SYNTH.fw}`)
     assert.equal(r.apiKey, SYNTH.fw)
+  })
+})
+
+describe('standalone key shares', () => {
+  it('recognizes an OpenCode-shaped key shared as bare base64 without a URL or label', () => {
+    const encoded = base64Encode(SYNTH.ocSk)
+    for (const text of [encoded, `OpenCode GO 马上过期\n${encoded}`, SYNTH.ocSk]) {
+      assert.equal(looksLikeConfig(text), true)
+      const result = parseShareText(text)
+      assert.ok(result)
+      assert.equal(result.apiKey, SYNTH.ocSk)
+      assert.equal(result.endpoint, null)
+    }
+  })
+
+  it('recognizes an isolated long key without a vendor prefix, plain or base64-encoded', () => {
+    for (const text of [SYNTH.bareKey, base64Encode(SYNTH.bareKey)]) {
+      assert.equal(looksLikeConfig(text), true)
+      const result = parseShareText(text)
+      assert.ok(result)
+      assert.equal(result.apiKey, SYNTH.bareKey)
+      assert.equal(result.endpoint, null)
+      assert.ok(result.confidence < 0.7)
+    }
+  })
+
+  it('does not promote repeated characters or encoded prose into standalone keys', () => {
+    for (const text of ['A'.repeat(64), base64Encode('This is an ordinary sentence, not a credential.')]) {
+      assert.equal(looksLikeConfig(text), false)
+      assert.equal(parseShareText(text), null)
+    }
+  })
+})
+
+describe('OpenCode Go URL suggestions', () => {
+  const keyOnly = { apiKey: SYNTH.ocSk, endpoint: null }
+
+  it('offers official protocol addresses only when the topic title identifies OpenCode Go', () => {
+    const suggestions = suggestOpenCodeGoEndpoints('OpenCode GO 马上过期', keyOnly)
+    assert.deepEqual(suggestions.map(({ url }) => url), [
+      'https://opencode.ai/zen/go/v1/responses',
+      'https://opencode.ai/zen/go/v1/chat/completions',
+      'https://opencode.ai/zen/go/v1/messages',
+    ])
+    assert.equal(suggestOpenCodeGoEndpoints('普通中转站分享', keyOnly).length, 0)
+    assert.equal(suggestOpenCodeGoEndpoints('OpenCode GO', { apiKey: null, endpoint: null }).length, 0)
+    assert.equal(
+      suggestOpenCodeGoEndpoints('OpenCode GO', { apiKey: SYNTH.ocSk, endpoint: SYNTH.endpoint }).length,
+      0,
+    )
   })
 })
 

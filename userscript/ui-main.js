@@ -12,6 +12,7 @@ import {
   describeConfigPayload,
   describeProviderParams,
   shouldIncludeFullConfigByDefault,
+  suggestOpenCodeGoEndpoints,
   MAX_DEEPLINK_LEN,
   MAX_SELECTION_LEN,
 } from './lib/core.mjs'
@@ -35,6 +36,8 @@ let scrollRaf = 0
 let lastConfigCheck = { text: null, ok: false }
 let selectedApp = null
 let currentResult = null
+let currentTopicTitle = ''
+let currentUrlSuggestions = []
 let currentModelInfo = null
 let currentDeeplink = null
 /** @type {string|null} */
@@ -95,6 +98,7 @@ const CSS_TEXT = `
   .ccs-overlay.show { display: flex; }
   .ccs-card {
     width: min(380px, 100%);
+    max-height: calc(100vh - 32px); overflow-y: auto;
     background: #2c2e33;
     color: #e9ecef;
     border-radius: 12px;
@@ -119,6 +123,21 @@ const CSS_TEXT = `
   .ccs-copy-key:hover:not(:disabled) { background: #373a40; color: #fff; }
   .ccs-copy-key:focus-visible { outline: 2px solid #228be6; outline-offset: 2px; }
   .ccs-copy-key:disabled { opacity: .4; cursor: not-allowed; }
+  .ccs-url-suggestions, .ccs-url-help {
+    display: none; margin: -2px 0 12px; font-size: 11px; line-height: 1.5;
+    color: #adb5bd;
+  }
+  .ccs-url-suggestions.show, .ccs-url-help.show { display: block; }
+  .ccs-url-suggestions a { color: #74c0fc; }
+  .ccs-url-row { border-top: 1px solid #495057; margin-top: 7px; padding-top: 7px; }
+  .ccs-url-row strong { display: block; color: #e9ecef; font-size: 12px; }
+  .ccs-url-row code { display: block; overflow-wrap: anywhere; color: #ced4da; }
+  .ccs-copy-url {
+    border: 1px solid #495057; border-radius: 6px; padding: 4px 8px;
+    margin-top: 4px; background: #373a40; color: #fff; cursor: pointer;
+  }
+  .ccs-copy-url:hover { background: #495057; }
+  .ccs-copy-url:focus-visible { outline: 2px solid #228be6; outline-offset: 2px; }
   .ccs-warn {
     font-size: 11px; color: #fcc419; margin: -4px 0 12px; line-height: 1.45;
   }
@@ -205,6 +224,8 @@ function getUi() {
         <div class="ccs-meta" id="meta"></div>
         <div class="ccs-err" id="err" role="alert" aria-live="assertive" style="display:none"></div>
         <div class="ccs-fields" id="fields"></div>
+        <div class="ccs-url-suggestions" id="url-suggestions"></div>
+        <div class="ccs-url-help" id="url-help"></div>
         <div class="ccs-cand" id="cand">
           <button type="button" id="cand-prev" aria-label="上一组候选">‹</button>
           <span class="ccs-cand-label" id="cand-label">候选 1/1</span>
@@ -255,6 +276,10 @@ function getUi() {
     shadow.getElementById('cancel').addEventListener('click', closeCard)
     shadow.getElementById('copy').addEventListener('click', () => copyDeeplink(true))
     shadow.getElementById('open').addEventListener('click', openImport)
+    shadow.getElementById('url-suggestions').addEventListener('click', (event) => {
+      const button = event.target.closest('button[data-url-index]')
+      if (button) copySuggestedUrl(Number(button.dataset.urlIndex))
+    })
     shadow.getElementById('app-claude').addEventListener('click', () => setApp('claude'))
     shadow.getElementById('app-codex').addEventListener('click', () => setApp('codex'))
     shadow.getElementById('cand-prev').addEventListener('click', () => shiftCandidate(-1))
@@ -283,6 +308,11 @@ function getSelectionText() {
   if (!plain) return ''
   const anchors = collectAnchorsInSelection(sel)
   return String(enrichTextWithAnchorHrefs(plain, anchors) || plain).trim()
+}
+
+function getTopicTitle() {
+  const heading = document.querySelector('#topic-title .fancy-title, #topic-title h1, h1.fancy-title')
+  return String(heading?.textContent || document.title || '').trim()
 }
 
 /**
@@ -411,6 +441,7 @@ function onImportClick(e) {
   e.stopPropagation()
   previouslyFocused = e.currentTarget
   const text = lastSelectionText || getSelectionText()
+  currentTopicTitle = getTopicTitle()
   const { btn } = getUi()
   btn.classList.remove('show')
 
@@ -485,6 +516,10 @@ function openErrorCard(msg) {
   const { overlay, shadow } = getUi()
   shadow.getElementById('meta').textContent = ''
   shadow.getElementById('fields').style.display = 'none'
+  currentUrlSuggestions = []
+  shadow.getElementById('url-suggestions').classList.remove('show')
+  shadow.getElementById('url-suggestions').innerHTML = ''
+  shadow.getElementById('url-help').classList.remove('show')
   shadow.getElementById('warn').textContent = ''
   shadow.getElementById('cand').classList.remove('show')
   shadow.getElementById('model-row').style.display = 'none'
@@ -587,6 +622,35 @@ function renderCard(result) {
   `
 
   shadow.getElementById('copy-key').addEventListener('click', copyApiKey)
+
+  currentUrlSuggestions = result.unsupportedApp
+    ? []
+    : suggestOpenCodeGoEndpoints(currentTopicTitle, result)
+  const urlSuggestions = shadow.getElementById('url-suggestions')
+  const urlHelp = shadow.getElementById('url-help')
+  if (currentUrlSuggestions.length) {
+    urlSuggestions.classList.add('show')
+    urlSuggestions.innerHTML = `
+      根据主题标题推荐的 OpenCode GO 地址；Key 本身没有包含地址。不同模型使用的地址不同，请先核对
+      <a href="https://opencode.ai/docs/go/#endpoints" target="_blank" rel="noopener noreferrer">官方说明</a>。
+      ${currentUrlSuggestions.map(({ label, url }, index) => `
+        <div class="ccs-url-row">
+          <strong>${escapeHtml(label)}</strong>
+          <code>${escapeHtml(url)}</code>
+          <button type="button" class="ccs-copy-url" data-url-index="${index}" aria-label="复制 ${escapeHtml(label)} 地址">复制地址</button>
+        </div>
+      `).join('')}
+      复制地址不会自动写入导入链接。
+    `
+    urlHelp.classList.remove('show')
+    urlHelp.textContent = ''
+  } else {
+    urlSuggestions.classList.remove('show')
+    urlSuggestions.innerHTML = ''
+    const needsUrl = Boolean(result.apiKey && !result.endpoint)
+    urlHelp.classList.toggle('show', needsUrl)
+    urlHelp.textContent = needsUrl ? '只凭 Key 无法确定地址，请从原帖查找或自行补充。' : ''
+  }
 
   const configOpt = shadow.getElementById('config-opt')
   const includeCb = shadow.getElementById('include-config')
@@ -835,6 +899,17 @@ async function copyApiKey() {
     showToast(ok ? 'Key 已复制到剪贴板' : 'Key 复制失败，请重试')
   } catch {
     showToast('Key 复制失败，请重试')
+  }
+}
+
+async function copySuggestedUrl(index) {
+  const url = currentUrlSuggestions[index]?.url
+  if (!url) return
+  try {
+    const ok = await copyText(url)
+    showToast(ok ? '地址已复制到剪贴板' : '地址复制失败，请重试')
+  } catch {
+    showToast('地址复制失败，请重试')
   }
 }
 

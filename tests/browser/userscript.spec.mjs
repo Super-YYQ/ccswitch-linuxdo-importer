@@ -9,8 +9,8 @@ const userscriptPath = path.resolve(
   '../../userscript/ccswitch-linuxdo-importer.user.js',
 )
 
-async function installUserscript(page, shareText) {
-  await page.setContent('<main><p id="share"></p></main>')
+async function installUserscript(page, shareText, topicTitle = '') {
+  await page.setContent('<main><h1 id="topic-title"><span class="fancy-title"></span></h1><p id="share"></p></main>')
   await page.evaluate(() => {
     window.__copiedDeeplinks = []
     window.__openedDeeplinks = []
@@ -27,6 +27,10 @@ async function installUserscript(page, shareText) {
   await page.locator('#share').evaluate((element, text) => {
     element.textContent = text
   }, shareText)
+  await page.locator('#topic-title .fancy-title').evaluate((element, title) => {
+    element.textContent = title
+    document.title = title
+  }, topicTitle)
   await page.addScriptTag({ content: await fs.readFile(userscriptPath, 'utf8') })
 }
 
@@ -81,6 +85,67 @@ test('copies the complete decoded API key while keeping it masked in the dialog'
   await expect(root.locator('#toast')).toHaveText('Key 已复制到剪贴板')
   await expect(fields).not.toContainText(apiKey)
   expect(await page.evaluate(() => window.__openedDeeplinks)).toEqual([])
+})
+
+test('recognizes a lone encoded key and offers copyable OpenCode Go addresses from the topic title', async ({ page }) => {
+  const apiKey = 'oc_sk_TESTONLY0000000000000000000000000000'
+  const encodedKey = Buffer.from(apiKey).toString('base64')
+  await installUserscript(page, encodedKey, 'OpenCode GO 马上过期')
+  await selectShare(page)
+
+  const root = page.locator('#ccs-ld-root')
+  await expect(root.locator('#btn')).toBeVisible()
+  await root.locator('#btn').click()
+  await expect(root.locator('#fields')).toContainText('endpoint—')
+  await expect(root.locator('#fields')).not.toContainText(apiKey)
+
+  const suggestions = root.locator('#url-suggestions')
+  await expect(suggestions).toBeVisible()
+  await expect(suggestions).toContainText('根据主题标题推荐')
+  await expect(suggestions.locator('.ccs-copy-url')).toHaveCount(3)
+  await root.getByRole('button', { name: '复制 Responses 地址' }).click()
+  await expect.poll(() => page.evaluate(() => window.__copiedDeeplinks)).toEqual([
+    'https://opencode.ai/zen/go/v1/responses',
+  ])
+  await root.getByRole('button', { name: '复制 Key', exact: true }).click()
+  await expect.poll(() => page.evaluate(() => window.__copiedDeeplinks)).toEqual([
+    'https://opencode.ai/zen/go/v1/responses',
+    apiKey,
+  ])
+  await root.locator('#app-codex').click()
+  await root.locator('#copy').click()
+  await expect
+    .poll(() => page.evaluate(() => window.__copiedDeeplinks.length))
+    .toBe(3)
+  const copied = await page.evaluate(() => window.__copiedDeeplinks)
+  const params = new URLSearchParams(copied[2].slice(copied[2].indexOf('?') + 1))
+  expect(params.get('apiKey')).toBe(apiKey)
+  expect(params.has('endpoint')).toBe(false)
+})
+
+test('copies a standalone prefix-less key without guessing a URL from an unrelated title', async ({ page }) => {
+  const apiKey = 'Ab9Cd8Ef7Gh6Ij5Kl4Mn3Op2Qr1St0Uv9Wx8Yz7'
+  await installUserscript(page, apiKey, '普通中转站分享')
+  await selectShare(page)
+
+  const root = page.locator('#ccs-ld-root')
+  await expect(root.locator('#btn')).toBeVisible()
+  await root.locator('#btn').click()
+  await expect(root.locator('#url-suggestions')).toBeHidden()
+  await expect(root.locator('#url-help')).toContainText('只凭 Key 无法确定地址')
+  await root.getByRole('button', { name: '复制 Key', exact: true }).click()
+  await expect.poll(() => page.evaluate(() => window.__copiedDeeplinks)).toEqual([apiKey])
+})
+
+test('does not offer OpenCode Go addresses from the key prefix alone', async ({ page }) => {
+  const apiKey = 'oc_sk_TESTONLY0000000000000000000000000000'
+  await installUserscript(page, Buffer.from(apiKey).toString('base64'), '普通分享')
+  await selectShare(page)
+
+  const root = page.locator('#ccs-ld-root')
+  await root.locator('#btn').click()
+  await expect(root.locator('#url-suggestions')).toBeHidden()
+  await expect(root.locator('#url-help')).toContainText('只凭 Key 无法确定地址')
 })
 
 test('copies the current candidate API key after switching candidates', async ({ page }) => {
