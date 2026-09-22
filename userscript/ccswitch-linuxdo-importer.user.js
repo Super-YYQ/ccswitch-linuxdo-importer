@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         CC Switch Importer for linux.do
 // @namespace    https://github.com/Super-YYQ/ccswitch-linuxdo-importer
-// @version      1.2.12
+// @version      1.2.13
 // @description  选中 linux.do 分享文本，一键导入 CC Switch（Claude Code / Codex，自动识别模型）
 // @author       CC Switch Importer Contributors
 // @match        https://linux.do/*
@@ -115,9 +115,14 @@
     "config",
     "configFormat"
   ]);
-  var KEY_PREFIX_RE = /^(sk-ant-|sk-|g2a_|tp-|nk-|pk-|rk-|ark-|xai-|gsk_|pplx-|r8_|hf_|fw_)/i;
-  var KEY_PREFIX_BODY_RE = /^(sk-ant-|sk-|g2a_|tp-|nk-|pk-|rk-|ark-|xai-|gsk_|pplx-|r8_|hf_|fw_|Bearer\s)/i;
-  var VENDOR_KEY_RE = /\b(?:g2a_|tp-|nk-|pk-|rk-|ark-|xai-|gsk_|pplx-|r8_|hf_|fw_)[A-Za-z0-9_\-]{8,}\b/g;
+  var KEY_PREFIX_RE = /^(sk-ant-|sk-|g2a_|tp-|nk-|pk-|rk-|ark-|xai-|gsk_|pplx-|r8_|hf_|fw_|oc_sk_)/i;
+  var KEY_PREFIX_BODY_RE = /^(sk-ant-|sk-|g2a_|tp-|nk-|pk-|rk-|ark-|xai-|gsk_|pplx-|r8_|hf_|fw_|oc_sk_|Bearer\s)/i;
+  var VENDOR_KEY_RE = /\b(?:g2a_|tp-|nk-|pk-|rk-|ark-|xai-|gsk_|pplx-|r8_|hf_|fw_|oc_sk_)[A-Za-z0-9_\-]{8,}\b/g;
+  var OPENCODE_GO_ENDPOINTS = [
+    { label: "Responses", url: "https://opencode.ai/zen/go/v1/responses" },
+    { label: "Chat Completions", url: "https://opencode.ai/zen/go/v1/chat/completions" },
+    { label: "Messages", url: "https://opencode.ai/zen/go/v1/messages" }
+  ];
   function parseShareText(text) {
     if (text == null) return null;
     let raw = normalizeShareText(text);
@@ -143,7 +148,8 @@
     const toml = tryParseTomlLike(cleaned);
     const env = tryParseEnv(cleaned);
     const mixed = tryParseMixed(cleaned);
-    const result = finalizeResult(mergeParseResults([b64, json, toml, env, mixed]), cleaned);
+    const parsed = mergeParseResults([b64, json, toml, env, mixed]) || tryParseStandaloneKey(cleaned);
+    const result = finalizeResult(parsed, cleaned);
     if (result && oversized) {
       result.warnings = [...result.warnings || [], OVERSIZED_SELECTION_WARNING];
     }
@@ -401,11 +407,51 @@ ${appended.join("\n")}`;
     }
     if (/https?:\/\//i.test(t) && /[A-Za-z0-9+/]{32,}={0,2}/.test(t)) return true;
     if (hasUsefulBase64Blob(t)) return true;
+    if (standaloneKeyCandidate(t)) return true;
     if (t.includes("{") && t.includes("}") && /"(?:apiKey|api_key|baseUrl|endpoint|base_url)"\s*:/.test(t)) {
       return true;
     }
     if (sampled.oversized) return true;
     return false;
+  }
+  function suggestOpenCodeGoEndpoints(topicTitle, result) {
+    if (!(result == null ? void 0 : result.apiKey) || result.endpoint) return [];
+    if (!/\bopen\s*code\s*go\b/i.test(String(topicTitle || ""))) return [];
+    return OPENCODE_GO_ENDPOINTS.map((entry) => ({ ...entry }));
+  }
+  function tryParseStandaloneKey(text) {
+    const apiKey = standaloneKeyCandidate(text);
+    if (!apiKey) return null;
+    return emptyResult({
+      apiKey,
+      confidence: scoreFields({ endpoint: null, apiKey }, null),
+      candidates: [{ endpoint: null, apiKey }],
+      warnings: ["\u4EC5\u6839\u636E\u5355\u72EC\u9009\u4E2D\u7684\u5B57\u7B26\u4E32\u8BC6\u522B\u4E3A\u53EF\u80FD\u7684 Key\uFF0C\u8BF7\u6838\u5BF9"]
+    });
+  }
+  function standaloneKeyCandidate(text) {
+    const token = String(text || "").trim();
+    if (token.length < 32 || token.length > 512 || /\s/.test(token)) return null;
+    if (!/^[A-Za-z0-9+/_-]+={0,2}$/.test(token)) return null;
+    if (token.length >= 40 && token.length % 4 !== 1) {
+      try {
+        const decoded = base64Decode(token);
+        const normalized = token.replace(/-/g, "+").replace(/_/g, "/").replace(/=+$/, "");
+        if (base64Encode(decoded).replace(/=+$/, "") === normalized) {
+          if (hasKeyPrefix(decoded) || looksLikeStandaloneKeyBody(decoded)) return decoded;
+          return null;
+        }
+      } catch (e) {
+      }
+    }
+    return looksLikeStandaloneKeyBody(token) ? token : null;
+  }
+  function looksLikeStandaloneKeyBody(value) {
+    const s = String(value || "");
+    if (s.length < 32 || s.length > 256 || !/^[A-Za-z0-9_-]+$/.test(s)) return false;
+    if (/^[0-9a-f-]+$/i.test(s) || /(?:your|please|example|xxxx|todo|changeme)/i.test(s)) return false;
+    if (new Set(s).size < 8) return false;
+    return /[A-Za-z]/.test(s) && /\d/.test(s);
   }
   function hasBareHost(text) {
     BARE_HOST_RE.lastIndex = 0;
@@ -2070,7 +2116,7 @@ ${config}`;
   }
 
   // userscript/ui-main.js
-  var SCRIPT_VERSION = "1.2.12";
+  var SCRIPT_VERSION = "1.2.13";
   var ROOT_ID = "ccs-ld-root";
   var Z = 2147483e3;
   var lastSelectionText = "";
@@ -2079,6 +2125,8 @@ ${config}`;
   var lastConfigCheck = { text: null, ok: false };
   var selectedApp = null;
   var currentResult = null;
+  var currentTopicTitle = "";
+  var currentUrlSuggestions = [];
   var currentModelInfo = null;
   var currentDeeplink = null;
   var selectedModel = null;
@@ -2134,6 +2182,7 @@ ${config}`;
   .ccs-overlay.show { display: flex; }
   .ccs-card {
     width: min(380px, 100%);
+    max-height: calc(100vh - 32px); overflow-y: auto;
     background: #2c2e33;
     color: #e9ecef;
     border-radius: 12px;
@@ -2158,6 +2207,21 @@ ${config}`;
   .ccs-copy-key:hover:not(:disabled) { background: #373a40; color: #fff; }
   .ccs-copy-key:focus-visible { outline: 2px solid #228be6; outline-offset: 2px; }
   .ccs-copy-key:disabled { opacity: .4; cursor: not-allowed; }
+  .ccs-url-suggestions, .ccs-url-help {
+    display: none; margin: -2px 0 12px; font-size: 11px; line-height: 1.5;
+    color: #adb5bd;
+  }
+  .ccs-url-suggestions.show, .ccs-url-help.show { display: block; }
+  .ccs-url-suggestions a { color: #74c0fc; }
+  .ccs-url-row { border-top: 1px solid #495057; margin-top: 7px; padding-top: 7px; }
+  .ccs-url-row strong { display: block; color: #e9ecef; font-size: 12px; }
+  .ccs-url-row code { display: block; overflow-wrap: anywhere; color: #ced4da; }
+  .ccs-copy-url {
+    border: 1px solid #495057; border-radius: 6px; padding: 4px 8px;
+    margin-top: 4px; background: #373a40; color: #fff; cursor: pointer;
+  }
+  .ccs-copy-url:hover { background: #495057; }
+  .ccs-copy-url:focus-visible { outline: 2px solid #228be6; outline-offset: 2px; }
   .ccs-warn {
     font-size: 11px; color: #fcc419; margin: -4px 0 12px; line-height: 1.45;
   }
@@ -2242,6 +2306,8 @@ ${config}`;
         <div class="ccs-meta" id="meta"></div>
         <div class="ccs-err" id="err" role="alert" aria-live="assertive" style="display:none"></div>
         <div class="ccs-fields" id="fields"></div>
+        <div class="ccs-url-suggestions" id="url-suggestions"></div>
+        <div class="ccs-url-help" id="url-help"></div>
         <div class="ccs-cand" id="cand">
           <button type="button" id="cand-prev" aria-label="\u4E0A\u4E00\u7EC4\u5019\u9009">\u2039</button>
           <span class="ccs-cand-label" id="cand-label">\u5019\u9009 1/1</span>
@@ -2290,6 +2356,10 @@ ${config}`;
       shadow.getElementById("cancel").addEventListener("click", closeCard);
       shadow.getElementById("copy").addEventListener("click", () => copyDeeplink(true));
       shadow.getElementById("open").addEventListener("click", openImport);
+      shadow.getElementById("url-suggestions").addEventListener("click", (event) => {
+        const button = event.target.closest("button[data-url-index]");
+        if (button) copySuggestedUrl(Number(button.dataset.urlIndex));
+      });
       shadow.getElementById("app-claude").addEventListener("click", () => setApp("claude"));
       shadow.getElementById("app-codex").addEventListener("click", () => setApp("codex"));
       shadow.getElementById("cand-prev").addEventListener("click", () => shiftCandidate(-1));
@@ -2314,6 +2384,10 @@ ${config}`;
     if (!plain) return "";
     const anchors = collectAnchorsInSelection(sel);
     return String(enrichTextWithAnchorHrefs(plain, anchors) || plain).trim();
+  }
+  function getTopicTitle() {
+    const heading = document.querySelector("#topic-title .fancy-title, #topic-title h1, h1.fancy-title");
+    return String((heading == null ? void 0 : heading.textContent) || document.title || "").trim();
   }
   function collectAnchorsInSelection(sel) {
     const out = [];
@@ -2417,6 +2491,7 @@ ${config}`;
     e.stopPropagation();
     previouslyFocused = e.currentTarget;
     const text = lastSelectionText || getSelectionText();
+    currentTopicTitle = getTopicTitle();
     const { btn } = getUi();
     btn.classList.remove("show");
     const result = parseShareText(text);
@@ -2477,6 +2552,10 @@ ${config}`;
     const { overlay, shadow } = getUi();
     shadow.getElementById("meta").textContent = "";
     shadow.getElementById("fields").style.display = "none";
+    currentUrlSuggestions = [];
+    shadow.getElementById("url-suggestions").classList.remove("show");
+    shadow.getElementById("url-suggestions").innerHTML = "";
+    shadow.getElementById("url-help").classList.remove("show");
     shadow.getElementById("warn").textContent = "";
     shadow.getElementById("cand").classList.remove("show");
     shadow.getElementById("model-row").style.display = "none";
@@ -2543,6 +2622,32 @@ ${config}`;
     <div><span class="k">\u914D\u7F6E\u5927\u5C0F</span>${escapeHtml(formatBytes(configInfo.sizeBytes || 0))}</div>` : ""}
   `;
     shadow.getElementById("copy-key").addEventListener("click", copyApiKey);
+    currentUrlSuggestions = result.unsupportedApp ? [] : suggestOpenCodeGoEndpoints(currentTopicTitle, result);
+    const urlSuggestions = shadow.getElementById("url-suggestions");
+    const urlHelp = shadow.getElementById("url-help");
+    if (currentUrlSuggestions.length) {
+      urlSuggestions.classList.add("show");
+      urlSuggestions.innerHTML = `
+      \u6839\u636E\u4E3B\u9898\u6807\u9898\u63A8\u8350\u7684 OpenCode GO \u5730\u5740\uFF1BKey \u672C\u8EAB\u6CA1\u6709\u5305\u542B\u5730\u5740\u3002\u4E0D\u540C\u6A21\u578B\u4F7F\u7528\u7684\u5730\u5740\u4E0D\u540C\uFF0C\u8BF7\u5148\u6838\u5BF9
+      <a href="https://opencode.ai/docs/go/#endpoints" target="_blank" rel="noopener noreferrer">\u5B98\u65B9\u8BF4\u660E</a>\u3002
+      ${currentUrlSuggestions.map(({ label, url }, index) => `
+        <div class="ccs-url-row">
+          <strong>${escapeHtml(label)}</strong>
+          <code>${escapeHtml(url)}</code>
+          <button type="button" class="ccs-copy-url" data-url-index="${index}" aria-label="\u590D\u5236 ${escapeHtml(label)} \u5730\u5740">\u590D\u5236\u5730\u5740</button>
+        </div>
+      `).join("")}
+      \u590D\u5236\u5730\u5740\u4E0D\u4F1A\u81EA\u52A8\u5199\u5165\u5BFC\u5165\u94FE\u63A5\u3002
+    `;
+      urlHelp.classList.remove("show");
+      urlHelp.textContent = "";
+    } else {
+      urlSuggestions.classList.remove("show");
+      urlSuggestions.innerHTML = "";
+      const needsUrl = Boolean(result.apiKey && !result.endpoint);
+      urlHelp.classList.toggle("show", needsUrl);
+      urlHelp.textContent = needsUrl ? "\u53EA\u51ED Key \u65E0\u6CD5\u786E\u5B9A\u5730\u5740\uFF0C\u8BF7\u4ECE\u539F\u5E16\u67E5\u627E\u6216\u81EA\u884C\u8865\u5145\u3002" : "";
+    }
     const configOpt = shadow.getElementById("config-opt");
     const includeCb = shadow.getElementById("include-config");
     const configMeta = shadow.getElementById("config-meta");
@@ -2742,6 +2847,17 @@ ${config}`;
       showToast(ok ? "Key \u5DF2\u590D\u5236\u5230\u526A\u8D34\u677F" : "Key \u590D\u5236\u5931\u8D25\uFF0C\u8BF7\u91CD\u8BD5");
     } catch (e) {
       showToast("Key \u590D\u5236\u5931\u8D25\uFF0C\u8BF7\u91CD\u8BD5");
+    }
+  }
+  async function copySuggestedUrl(index) {
+    var _a;
+    const url = (_a = currentUrlSuggestions[index]) == null ? void 0 : _a.url;
+    if (!url) return;
+    try {
+      const ok = await copyText(url);
+      showToast(ok ? "\u5730\u5740\u5DF2\u590D\u5236\u5230\u526A\u8D34\u677F" : "\u5730\u5740\u590D\u5236\u5931\u8D25\uFF0C\u8BF7\u91CD\u8BD5");
+    } catch (e) {
+      showToast("\u5730\u5740\u590D\u5236\u5931\u8D25\uFF0C\u8BF7\u91CD\u8BD5");
     }
   }
   function copyDeeplink(fromBtn) {
